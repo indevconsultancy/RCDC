@@ -1,0 +1,480 @@
+/* ============================================================
+   mNEQAS professional theme
+   Ported from the NTESIS design system so both RCDC applications
+   share one visual identity.
+   Palette: brand blue (#007bff) + slate neutrals.
+
+   Load order matters: this file must be the LAST stylesheet in
+   includes/css-jquery.php (after adminlte.min.css and after the
+   embedded mNEQAS design-system <style> block) so its geometry
+   and palette win.
+
+   The --nt-* token names are kept from the source system on
+   purpose, so future NTESIS theme updates can be diffed and
+   re-applied cleanly.
+   ============================================================ */
+:root {
+  --nt-primary: #007bff;
+  --nt-primary-dark: #0056b3;
+  --nt-primary-light: #d6e9ff;
+  --nt-sky: #17a2b8;
+  --nt-sky-dark: #117a8b;
+  --nt-amber: #fd7e14;
+  --nt-red: #dc3545;
+  --nt-green: #28a745;
+  --nt-violet: #6f42c1;
+  --nt-slate-50: #f8fafc;
+  --nt-slate-100: #f1f5f9;
+  --nt-slate-200: #e2e8f0;
+  --nt-slate-300: #cbd5e1;
+  --nt-slate-400: #94a3b8;
+  --nt-slate-500: #64748b;
+  --nt-slate-600: #475569;
+  --nt-slate-700: #334155;
+  --nt-slate-800: #1e293b;
+  --nt-slate-900: #0f172a;
+  --nt-shadow: 0 1px 3px rgba(15, 23, 42, .08), 0 1px 2px rgba(15, 23, 42, .04);
+  --nt-shadow-md: 0 4px 12px rgba(15, 23, 42, .10);
+  --nt-radius: 10px;
+}
+
+/* ---------- Base ---------- */
+body {
+  font-family: 'Source Sans Pro', -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--nt-slate-700);
+}
+.content-wrapper { background: var(--nt-slate-100); }
+.content-header h1 { font-weight: 700; color: var(--nt-slate-800); font-size: 1.6rem; }
+.breadcrumb { background: transparent; font-size: .85rem; }
+.breadcrumb-item a { color: var(--nt-primary); }
+a { color: var(--nt-primary); }
+a:hover { color: var(--nt-primary-dark); }
+
+/* ---------- Top navbar ---------- */
+.main-header.navbar {
+  background: #fff !important;
+  border-bottom: 1px solid var(--nt-slate-200);
+  box-shadow: var(--nt-shadow);
+  min-height: 56px;
+}
+.main-header .nav-link { color: var(--nt-slate-600) !important; }
+.main-header .nav-link:hover { color: var(--nt-primary) !important; }
+.nt-user-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 14px 4px 6px; margin: 4px 8px;
+  background: var(--nt-slate-100); border-radius: 999px;
+  font-size: .85rem; color: var(--nt-slate-700);
+}
+.nt-user-chip .nt-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--nt-primary); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .8rem; text-transform: uppercase;
+}
+.nt-user-chip .nt-role {
+  font-size: .7rem; color: var(--nt-primary-dark);
+  background: var(--nt-primary-light); border-radius: 999px; padding: 1px 8px;
+  font-weight: 600; white-space: nowrap;
+}
+
+/* ---------- Sidebar ---------- */
+.main-sidebar, .main-sidebar::before {
+  background: linear-gradient(180deg, var(--nt-slate-900) 0%, var(--nt-slate-800) 100%) !important;
+}
+.brand-link {
+  border-bottom: 1px solid rgba(255,255,255,.08) !important;
+  padding: .8rem .8rem;
+}
+.brand-link .brand-text { font-weight: 700 !important; letter-spacing: 1.5px; color: #fff; }
+.brand-link .nt-brand-sub {
+  display: block; font-size: .62rem; color: var(--nt-slate-400);
+  letter-spacing: .4px; font-weight: 400; margin-top: -2px;
+}
+.sidebar { padding-top: .5rem; }
+.nav-sidebar .nav-header {
+  color: var(--nt-slate-500); font-size: .7rem; letter-spacing: 1.2px;
+  font-weight: 700; padding: .8rem 1rem .4rem;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link {
+  color: var(--nt-slate-300);
+  border-radius: 8px; margin: 2px 8px; width: auto;
+  transition: background .15s, color .15s;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link:hover,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link:hover {
+  background: rgba(255,255,255,.06); color: #fff;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link.active,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link.active {
+  background: var(--nt-primary) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(0, 123, 255, .45) !important;
+}
+.nav-sidebar .nav-icon { font-size: .95rem; }
+
+/* ---------- Cards ---------- */
+.card {
+  border: 1px solid var(--nt-slate-200);
+  border-radius: var(--nt-radius);
+  box-shadow: var(--nt-shadow);
+}
+.card-header {
+  background: #fff;
+  border-bottom: 1px solid var(--nt-slate-200);
+  border-radius: var(--nt-radius) var(--nt-radius) 0 0 !important;
+  padding: .8rem 1.25rem;
+}
+.card-title { font-weight: 700; color: var(--nt-slate-800); font-size: 1.02rem; }
+.card-footer { background: var(--nt-slate-50); border-radius: 0 0 var(--nt-radius) var(--nt-radius) !important; }
+/* colored "primary" cards become white with a brand top accent */
+.card-primary:not(.card-outline) > .card-header {
+  background: #fff; color: var(--nt-slate-800);
+  border-top: 3px solid var(--nt-primary);
+}
+.card-primary:not(.card-outline) > .card-header .card-title { color: var(--nt-slate-800); }
+.card-primary.card-outline { border-top: 3px solid var(--nt-primary); }
+.card-info.card-outline { border-top: 3px solid var(--nt-sky); }
+.card-secondary.card-outline { border-top: 3px solid var(--nt-slate-500); }
+.card-danger.card-outline { border-top: 3px solid var(--nt-red); }
+.card-warning.card-outline { border-top: 3px solid var(--nt-amber); }
+.card-success.card-outline { border-top: 3px solid var(--nt-green); }
+.card .btn-tool { color: var(--nt-slate-400); }
+
+/* ---------- Stat cards (restyled AdminLTE small-box) ---------- */
+.small-box {
+  background: #fff !important;
+  border-radius: var(--nt-radius);
+  border: 1px solid var(--nt-slate-200);
+  box-shadow: var(--nt-shadow);
+  color: var(--nt-slate-700) !important;
+  position: relative; overflow: hidden;
+  /* fill the column so every card in a row shares the same top and bottom line */
+  height: calc(100% - 20px);
+}
+.small-box .inner { padding: 16px 18px; }
+.small-box .inner h3 { font-weight: 800; color: var(--nt-slate-900); font-size: 1.9rem; }
+.small-box .inner b { color: var(--nt-slate-500); font-size: .8rem; text-transform: uppercase; letter-spacing: .6px; }
+.small-box .inner p { color: var(--nt-slate-800); font-size: 1.6rem; font-weight: 800; margin-bottom: 4px; }
+.small-box .icon { color: var(--nt-slate-200); transition: none; }
+.small-box .icon > i { font-size: 55px; top: 14px; }
+.small-box.bg-info .icon { color: rgba(23, 162, 184, .18); }
+.small-box.bg-success .icon { color: rgba(40, 167, 69, .18); }
+.small-box.bg-warning .icon { color: rgba(253, 126, 20, .18); }
+.small-box.bg-danger .icon { color: rgba(220, 53, 69, .18); }
+.small-box.bg-secondary .icon { color: rgba(100, 116, 139, .18); }
+/* mNEQAS runs six stat boxes, so the brand tint is added to the set */
+.small-box.bg-primary .icon { color: rgba(0, 123, 255, .18); }
+.small-box .small-box-footer { display: none; }
+.small-box a { color: var(--nt-primary) !important; }
+
+/* ---------- Buttons: flatten the loud gradients ---------- */
+.btn { border-radius: 8px; font-weight: 600; }
+[class*="bg-gradient-"].btn, .btn[class*="bg-gradient-"] { background-image: none !important; }
+.btn.bg-gradient-success { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; color: #fff; }
+.btn.bg-gradient-success:hover { background: var(--nt-primary-dark) !important; }
+.btn.bg-gradient-primary, .btn-primary { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; color: #fff; }
+.btn.bg-gradient-primary:hover, .btn-primary:hover { background: var(--nt-primary-dark) !important; }
+.btn.bg-gradient-info { background: var(--nt-sky) !important; border-color: var(--nt-sky) !important; color: #fff; }
+.btn.bg-gradient-danger { background: var(--nt-red) !important; border-color: var(--nt-red) !important; color: #fff; }
+.btn.bg-gradient-danger:hover { background: #bd2130 !important; }
+.btn.bg-gradient-secondary { background: #fff !important; border: 1px solid var(--nt-slate-300) !important; color: var(--nt-slate-600) !important; }
+.btn.bg-gradient-secondary:hover { background: var(--nt-slate-100) !important; color: var(--nt-slate-800) !important; }
+
+/* ---------- Forms ---------- */
+.form-control { border-radius: 8px; border-color: var(--nt-slate-300); color: var(--nt-slate-800); }
+.form-control:focus {
+  border-color: var(--nt-primary);
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, .15);
+}
+.col-form-label-sm { font-weight: 600; color: var(--nt-slate-600); }
+label { color: var(--nt-slate-700); }
+.input-group-text { background: var(--nt-slate-100); border-color: var(--nt-slate-300); color: var(--nt-slate-500); border-radius: 8px; }
+.select2-container--bootstrap4 .select2-selection { border-color: var(--nt-slate-300); border-radius: 8px; }
+.select2-container--bootstrap4.select2-container--focus .select2-selection {
+  border-color: var(--nt-primary); box-shadow: 0 0 0 3px rgba(0, 123, 255, .15);
+}
+.select2-container--bootstrap4 .select2-selection--multiple .select2-selection__choice {
+  background: var(--nt-primary-light); border: 1px solid var(--nt-primary); color: var(--nt-primary-dark); border-radius: 6px;
+}
+
+/* ---------- Tables ---------- */
+.table thead th {
+  background: var(--nt-slate-50);
+  color: var(--nt-slate-600);
+  border-bottom: 2px solid var(--nt-slate-200) !important;
+  font-size: .8rem; text-transform: uppercase; letter-spacing: .5px;
+  font-weight: 700;
+}
+.table td, .table th { border-color: var(--nt-slate-200); vertical-align: middle; }
+.table-hover tbody tr:hover { background: #f0f7ff; }
+.table-striped tbody tr:nth-of-type(odd) { background: var(--nt-slate-50); }
+.dataTables_wrapper .dt-buttons .btn { background: #fff; border: 1px solid var(--nt-slate-300); color: var(--nt-slate-600); }
+.page-item.active .page-link { background: var(--nt-primary); border-color: var(--nt-primary); }
+.page-link { color: var(--nt-primary); }
+
+/* ---------- Progress ---------- */
+.progress { border-radius: 999px; background: var(--nt-slate-200); }
+.progress-bar { background: linear-gradient(90deg, var(--nt-primary) 0%, #4dabf7 100%) !important; font-weight: 600; }
+/* slim progress line (patients wizard) */
+.nt-progress-line {
+  height: 6px; border-radius: 999px; background: var(--nt-slate-200);
+  overflow: hidden; margin-bottom: 6px;
+}
+.nt-progress-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--nt-primary) 0%, #4dabf7 100%);
+  transition: width .4s ease;
+}
+
+/* ---------- Patients wizard stepper ---------- */
+.nt-stepper { display: flex; align-items: flex-start; margin-bottom: 12px; }
+.nt-step {
+  flex: 1 1 0; min-width: 84px; position: relative; text-align: center;
+  text-decoration: none; padding: 0 4px;
+}
+.nt-step:hover { text-decoration: none; }
+/* connector line between circles */
+.nt-step:not(:first-child)::before {
+  content: ""; position: absolute; top: 16px; height: 3px; border-radius: 99px;
+  left: calc(-50% + 24px); right: calc(50% + 24px);
+  background: var(--nt-slate-200); transition: background .3s;
+}
+.nt-step.connected:not(:first-child)::before { background: var(--nt-primary); }
+.nt-step-circle {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .85rem;
+  background: #fff; border: 2px solid var(--nt-slate-300); color: var(--nt-slate-500);
+  position: relative; z-index: 1; transition: all .15s;
+}
+.nt-step-label {
+  display: block; margin-top: 6px; font-size: .76rem; font-weight: 600;
+  color: var(--nt-slate-500); line-height: 1.25;
+}
+.nt-step.done .nt-step-circle { background: var(--nt-primary); border-color: var(--nt-primary); color: #fff; }
+.nt-step.done .nt-step-label { color: var(--nt-primary-dark); }
+.nt-step.active .nt-step-circle {
+  background: var(--nt-primary); border-color: var(--nt-primary); color: #fff;
+  box-shadow: 0 0 0 5px rgba(0, 123, 255, .18);
+}
+.nt-step.active .nt-step-label { color: var(--nt-primary); }
+.nt-step.locked { opacity: .45; pointer-events: none; }
+.nt-step:not(.locked):hover .nt-step-circle { border-color: var(--nt-primary); }
+@media (max-width: 768px) { .nt-stepper { overflow-x: auto; padding-bottom: 4px; } }
+.preview-section h5 {
+  border-bottom: 1px solid var(--nt-slate-200); padding-bottom: 8px;
+  font-weight: 700; color: var(--nt-slate-800); font-size: 1.02rem;
+}
+.preview-section dt { color: var(--nt-slate-500); font-weight: 600; font-size: .86rem; }
+.preview-section dd { color: var(--nt-slate-800); }
+
+/* ---------- Login page ---------- */
+.login-page {
+  background: linear-gradient(135deg, var(--nt-slate-900) 0%, #0a3d7a 60%, var(--nt-primary) 100%);
+  min-height: 100vh;
+}
+.login-box { width: 400px; }
+.login-box .card {
+  border: none; border-radius: 14px; box-shadow: 0 20px 50px rgba(2, 6, 23, .45);
+  overflow: hidden;
+}
+.nt-login-brand {
+  background: #fff; text-align: center; padding: 26px 20px 6px;
+}
+.nt-login-brand img {
+  width: 72px; height: 72px; border-radius: 50%;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .18); margin-bottom: 12px;
+}
+.nt-login-brand .nt-login-title {
+  font-size: 1.5rem; font-weight: 800; letter-spacing: 3px; color: var(--nt-slate-900);
+  display: block;
+}
+.nt-login-brand .nt-login-sub {
+  color: var(--nt-slate-500); font-size: .8rem; display: block; margin-top: 2px;
+}
+.login-card-body, .login-box .card-body { border-radius: 0 0 14px 14px; }
+.login-box .btn-primary { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; }
+.login-box .btn-primary:hover { background: var(--nt-primary-dark) !important; }
+.login-box-msg { padding: 0 0 12px; }
+
+/* ---------- Footer ---------- */
+.main-footer {
+  background: #fff; border-top: 1px solid var(--nt-slate-200);
+  color: var(--nt-slate-500); font-size: .85rem;
+}
+.main-footer strong { color: var(--nt-slate-600); font-weight: 600; }
+
+/* ---------- Misc ---------- */
+.alert { border-radius: var(--nt-radius); }
+.swal2-popup { border-radius: 14px !important; font-family: 'Source Sans Pro', sans-serif !important; }
+.nt-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.nt-toolbar label { margin: 0; font-weight: 700; color: var(--nt-slate-700); }
+.nt-toolbar .form-control { width: auto; }
+
+/* ============================================================
+   mNEQAS-specific alignment
+   The embedded design-system block in includes/css-jquery.php
+   ships a few !important rules (4px radii) that would otherwise
+   outrank this theme. These re-assert the NTESIS geometry, and
+   restyle mNEQAS-only components to the slate palette.
+   ============================================================ */
+
+/* Select2 + controls: adopt the 8px radius (the legacy block forces 4px) */
+.select2-container--bootstrap4 .select2-selection,
+.select2-container--default .select2-selection--single {
+  border-radius: 8px !important;
+  border-color: var(--nt-slate-300) !important;
+}
+.select2-container--bootstrap4.select2-container--focus .select2-selection,
+.select2-container--default.select2-container--focus .select2-selection--single {
+  border-color: var(--nt-primary) !important;
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, .15);
+}
+.form-control, .custom-select, select.form-control, .input-group > .form-control { border-radius: 8px; }
+.input-group.date .input-group-append .input-group-text {
+  border-color: var(--nt-slate-300); background: var(--nt-slate-100); color: var(--nt-slate-500);
+  border-top-right-radius: 8px; border-bottom-right-radius: 8px;
+}
+.card-footer { background: var(--nt-slate-50); border-top: 1px solid var(--nt-slate-200); }
+
+/* ============================================================
+   Standardized workflow stepper (application-wide)
+   ------------------------------------------------------------
+   ONE canonical visual design for BOTH legacy stepper markups:
+     • .wiz-nav .wiz-step      (Molecular, RDT, Onsite M&S wizards)
+     • .bs-wizard .wizard-step (Blinded intake & process wizard)
+   States are toggled by each page's existing JS — UNCHANGED here:
+     (default) → light-gray numbered circle          "Pending"
+     .active   → filled primary-blue circle + glow    "In Progress"
+     .done     → green circle + white check           "Completed"
+     .disabled / .locked → dimmed
+   This is PURELY visual: no markup, JS, navigation, validation,
+   step order, or backend logic is touched. `!important` is used
+   deliberately so this single source of truth overrides the
+   scattered per-page inline stepper styles (which use no
+   !important), regardless of stylesheet source order.
+   ============================================================ */
+
+/* --- shared row layout --- */
+.wiz-nav, .bs-wizard { display: flex; flex-wrap: nowrap; padding: 0; margin: 0 0 1.5rem; list-style: none; }
+.wiz-nav .wiz-step, .bs-wizard .wizard-step {
+  flex: 1 1 0 !important; min-width: 0 !important; position: relative;
+  text-align: center; padding: 2px 6px 0; color: var(--nt-slate-500);
+  font-size: 12.5px; font-weight: 600; line-height: 1.25; cursor: pointer;
+}
+
+/* --- numbered circle (unified 44px) --- */
+.wiz-nav .wiz-step .wiz-num, .bs-wizard .wizard-step .num {
+  position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center;
+  width: 44px !important; height: 44px !important; border-radius: 50% !important;
+  margin: 0 auto 8px !important; border: 3px solid #fff !important;
+  background: var(--nt-slate-200) !important; color: var(--nt-slate-500) !important;
+  font-weight: 700 !important; font-size: 1rem !important;
+  box-shadow: 0 0 0 1px var(--nt-slate-300) !important; transition: all .2s ease !important;
+}
+
+/* --- step title below the circle --- */
+.wiz-nav .wiz-step .wiz-label { position: relative; z-index: 1; display: block; margin: 0 auto; max-width: 16ch; }
+/* Onsite/Molecular/RDT wrap their label in a block .wiz-label, so the inline-flex
+   circle already sits on its own line. Blinded's label is a BARE text node after
+   the .num span, so with an inline-flex circle the text would render to the RIGHT
+   of the circle. Force Blinded's circle to be block-level (display:flex) so the
+   label always flows BELOW it, centred, and never beside it. */
+.bs-wizard .wizard-step .num { display: flex !important; margin: 0 auto 8px !important; }
+.bs-wizard .wizard-step { overflow-wrap: break-word; word-break: normal; }
+
+/* --- connector rail (each family keeps its own side; unified colour + thickness) --- */
+.wiz-nav .wiz-step::before {
+  content: ""; position: absolute; top: 24px !important; left: -50%; width: 100%;
+  height: 4px !important; background: var(--nt-slate-200) !important; z-index: 0;
+}
+.wiz-nav .wiz-step:first-child::before { display: none; }
+/* Blinded uses the SAME left-incoming rail as .wiz-nav so the progress line
+   fills identically (up to the current step, not one segment past it). */
+.bs-wizard .wizard-step:not(:first-child)::before {
+  content: ""; position: absolute; top: 24px !important; left: -50%; width: 100%;
+  height: 4px !important; background: var(--nt-slate-200) !important; z-index: 0;
+}
+
+/* --- status caption below the title (unified for both families) --- */
+.wiz-nav .wiz-step::after, .bs-wizard .wizard-step::after {
+  content: "Pending" !important; display: block; margin-top: 3px;
+  font-size: 11px; font-weight: 600; color: var(--nt-slate-400) !important;
+}
+
+/* ===== ACTIVE — current step, prominent blue ===== */
+.wiz-nav .wiz-step.active, .bs-wizard .wizard-step.active { color: var(--nt-slate-900) !important; font-weight: 700; }
+.wiz-nav .wiz-step.active .wiz-num, .bs-wizard .wizard-step.active .num {
+  background: var(--nt-primary) !important; border-color: #fff !important; color: #fff !important;
+  box-shadow: 0 0 0 4px rgba(0, 123, 255, .20) !important;
+}
+.wiz-nav .wiz-step.active::after, .bs-wizard .wizard-step.active::after { content: "In Progress" !important; color: var(--nt-primary) !important; }
+.wiz-nav .wiz-step.active::before, .bs-wizard .wizard-step.active::before { background: var(--nt-primary) !important; }
+
+/* ===== DONE — completed step, green + white check ===== */
+.wiz-nav .wiz-step.done, .bs-wizard .wizard-step.done { color: var(--nt-slate-900) !important; font-weight: 700; }
+.wiz-nav .wiz-step.done .wiz-num, .bs-wizard .wizard-step.done .num {
+  background: #28a745 !important; border-color: #fff !important; color: #fff !important;
+  box-shadow: 0 0 0 1px #28a745 !important; font-size: 0 !important;
+}
+.wiz-nav .wiz-step.done .wiz-num::before, .bs-wizard .wizard-step.done .num::before {
+  content: "\f00c"; font-family: "Font Awesome 5 Free"; font-weight: 900; font-size: 1rem !important;
+}
+.wiz-nav .wiz-step.done::after, .bs-wizard .wizard-step.done::after { content: "Completed" !important; color: #1e7e46 !important; }
+.wiz-nav .wiz-step.done::before, .bs-wizard .wizard-step.done::before { background: #28a745 !important; }
+
+/* ===== DISABLED / LOCKED — dimmed pending ===== */
+.wiz-nav .wiz-step.disabled, .bs-wizard .wizard-step.locked { cursor: not-allowed; opacity: .55 !important; }
+.wiz-nav .wiz-step.disabled .wiz-num, .bs-wizard .wizard-step.locked .num {
+  background: var(--nt-slate-200) !important; color: var(--nt-slate-400) !important;
+  box-shadow: 0 0 0 1px var(--nt-slate-300) !important;
+}
+.bs-wizard .wizard-step.locked::after { content: "Locked" !important; color: var(--nt-slate-400) !important; }
+
+/* --- responsive (no wrap / overlap on small screens) --- */
+@media (max-width: 575.98px) {
+  .wiz-nav .wiz-step, .bs-wizard .wizard-step { font-size: 10.5px; padding: 2px 2px 0; }
+  .wiz-nav .wiz-step .wiz-num, .bs-wizard .wizard-step .num {
+    width: 36px !important; height: 36px !important; font-size: .85rem !important; margin-bottom: 5px !important;
+  }
+  .wiz-nav .wiz-step::before, .bs-wizard .wizard-step:not(:first-child)::before { top: 20px !important; }
+  .wiz-nav .wiz-step.done .wiz-num::before, .bs-wizard .wizard-step.done .num::before { font-size: .8rem !important; }
+  .wiz-nav .wiz-step::after, .bs-wizard .wizard-step::after { font-size: 9.5px; }
+}
+.wiz-nav .wiz-step.active::after { color: var(--nt-primary); }
+.review-sec { border-color: var(--nt-slate-200); border-radius: var(--nt-radius); }
+.review-sec .review-head { background: var(--nt-slate-50); border-color: var(--nt-slate-200); }
+
+/* Dashboard analytics tables — NTESIS palette, keeps sticky first column
+   and the section / total emphasis rows. */
+.mn-table-wrap { border: 1px solid var(--nt-slate-200); border-radius: var(--nt-radius); }
+.mn-analytics thead th {
+  background: var(--nt-slate-50); color: var(--nt-slate-600);
+  border-bottom: 2px solid var(--nt-slate-200);
+  text-transform: uppercase; letter-spacing: .5px; font-weight: 700; font-size: .72rem;
+}
+.mn-analytics tbody td { border-bottom: 1px solid var(--nt-slate-100); color: var(--nt-slate-700); }
+.mn-analytics .mn-firstcol { background: var(--nt-slate-50); color: var(--nt-slate-800); }
+.mn-analytics thead th.mn-firstcol { background: var(--nt-slate-100); color: var(--nt-slate-600); }
+.mn-analytics tr.mn-section td {
+  background: var(--nt-slate-100); color: var(--nt-slate-600);
+}
+.mn-analytics tr.mn-total td { background: var(--nt-slate-50); color: var(--nt-slate-900); border-top: 1px solid var(--nt-slate-200); }
+.mn-analytics tr.mn-total td.mn-firstcol { background: var(--nt-slate-100); color: var(--nt-slate-900); }
+.mn-analytics thead th:last-child { background: var(--nt-primary-light); color: var(--nt-primary-dark); }
+.mn-analytics tbody td:last-child:not(.mn-firstcol):not(.mn-section-cell) { background: #f2f8ff; }
+.mn-analytics tbody tr.mn-total td:last-child:not(.mn-firstcol) { background: #e6f1ff; }
+.mn-chip { background: var(--nt-slate-100); color: var(--nt-slate-700); border-radius: 6px; }
+.mn-chip-strong { background: var(--nt-primary-light); color: var(--nt-primary-dark); }
+.mn-cur .mn-chip { background: var(--nt-primary-light); color: var(--nt-primary-dark); }
+
+/* Panel Testing key/summary tiles */
+.mn-key, .mn-br-stat { background: var(--nt-slate-50); border: 1px solid var(--nt-slate-200); border-radius: 8px; }
+.mn-key-label, .mn-summary-label, .mn-br-stat-label { color: var(--nt-slate-500); }
+.mn-key-value, .mn-br-stat-value { color: var(--nt-slate-900); }
+.mn-summary { background: var(--nt-slate-50); border: 1px solid var(--nt-slate-200); border-radius: 8px; }
+.mn-summary-value { color: var(--nt-slate-800); }
+.mn-badge-green { background: #e4f5ea; color: #1e7e46; }
+.mn-badge-amber { background: #fdf1dc; color: #95651a; }
+.mn-badge-gray { background: var(--nt-slate-100); color: var(--nt-slate-600); }

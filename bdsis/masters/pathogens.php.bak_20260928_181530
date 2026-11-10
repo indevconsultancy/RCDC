@@ -1,0 +1,180 @@
+<?php require_once __DIR__ . '/_inc.php'; ?>
+<?php
+/* Load rows + a per-pathogen "in use" count so the admin can see which rows are
+   safe to delete outright and which must be renamed / left alone. Two SELECTs,
+   both indexed on pathogen_id -- cheap. */
+$rows = array();
+$res = $bdsis->query("SELECT pathogen_id, enteric_pathogen FROM ms_enteric_bacterial_pathogen_table ORDER BY pathogen_id ASC");
+if ($res) {
+    while (list($pid, $pname) = $res->fetch_row()) {
+        $rows[] = array(
+            'pid'  => (string)$pid,
+            'name' => (string)$pname,
+            'uses' => mdCountRefs($bdsis,
+                "SELECT COUNT(*) FROM bacteriology_result_table2 WHERE pathogen_id=?", "s", (string)$pid)
+                    + mdCountRefs($bdsis,
+                "SELECT COUNT(*) FROM rcdc_ecoli_pcr_result_table2 WHERE ecoli_id=?", "s", (string)$pid),
+        );
+    }
+    $res->free();
+}
+
+/* Edit-mode: if ?edit=<pid> is in the URL, pre-fill the form; otherwise blank
+   Add form. Rename never changes the pid (that would silently reinterpret every
+   past bacteriology row); only enteric_pathogen is editable. */
+$editPid  = isset($_GET['edit']) ? (string)$_GET['edit'] : '';
+$editName = '';
+if ($editPid !== '') {
+    foreach ($rows as $r) { if ($r['pid'] === $editPid) { $editName = $r['name']; break; } }
+    if ($editName === '') { $editPid = ''; }   // unknown id -> back to Add mode
+}
+
+/* Retired pathogens (hidden from the "new isolate" pick list) are still hardcoded
+   in lab.php ($bpRetiredPathogens). Read it defensively so the badge is
+   informational and never breaks if the array moves. */
+$retiredIds = array();
+$labPath = __DIR__ . '/../lab/lab.php';
+if (is_readable($labPath)) {
+    $labSrc = @file_get_contents($labPath);
+    if ($labSrc !== false && preg_match('~\$bpRetiredPathogens\s*=\s*array\((.*?)\)~', $labSrc, $m)) {
+        if (preg_match_all("~'(\\d+)'~", $m[1], $mm)) { $retiredIds = $mm[1]; }
+    }
+}
+?>
+<?php require_once __DIR__ . '/../includes/header.php'; ?>
+<?php require_once __DIR__ . '/../includes/css-jquery.php'; ?>
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+  <?php require_once __DIR__ . '/../includes/top-navbar.php'; ?>
+  <?php require_once __DIR__ . '/../includes/sidebar-menu.php'; ?>
+
+  <div class="content-wrapper">
+    <section class="content-header">
+      <div class="container-fluid">
+        <div class="row mb-2">
+          <div class="col-sm-8">
+            <h1 class="m-0">Enteric Pathogens</h1>
+            <p class="text-muted mb-0" style="font-size:.86rem;">
+              Reference list backing the Bacteriology &amp; E.&nbsp;coli PCR dropdowns
+            </p>
+          </div>
+          <div class="col-sm-4">
+            <ol class="breadcrumb float-sm-right">
+              <li class="breadcrumb-item"><a href="../dashboard/dashboard.php">Dashboard</a></li>
+              <li class="breadcrumb-item"><a href="index.php">Master Data</a></li>
+              <li class="breadcrumb-item active">Enteric Pathogens</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="container-fluid">
+        <?= mdFlashRender(); ?>
+
+        <div class="row">
+          <div class="col-lg-8">
+            <div class="card">
+              <div class="card-header"><h3 class="card-title">All pathogens</h3></div>
+              <div class="card-body p-0">
+                <table id="tblPath" class="table table-hover table-sm" style="width:100%;">
+                  <thead>
+                    <tr><th style="width:90px;">ID</th><th>Name</th><th class="text-right" style="width:110px;">In use</th><th style="width:170px;" class="text-center">Action</th></tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ($rows as $r): ?>
+                    <tr>
+                      <td><code><?= htmlspecialchars($r['pid'], ENT_QUOTES); ?></code></td>
+                      <td>
+                        <?= htmlspecialchars($r['name'], ENT_QUOTES); ?>
+                        <?php if (in_array($r['pid'], $retiredIds, true)): ?>
+                          <span class="badge badge-warning" title="Hidden from the new-isolate pick list; still shown on records that carry it">Retired</span>
+                        <?php endif; ?>
+                      </td>
+                      <td class="text-right"><?= (int)$r['uses']; ?></td>
+                      <td class="text-center">
+                        <?php if (bdsis_masters_can_write('pathogens')): ?>
+                          <a href="?edit=<?= urlencode($r['pid']); ?>#editForm" class="btn btn-xs btn-outline-primary">Edit</a>
+                        <?php endif; ?>
+                        <?php if ($r['uses'] === 0 && bdsis_masters_can_delete('pathogens')): ?>
+                          <form method="post" action="iu-pathogens.php" style="display:inline;" onsubmit="return confirm('Delete pathogen <?= htmlspecialchars($r['pid'], ENT_QUOTES); ?> permanently? This cannot be undone.');">
+                            <?= bdsis_csrf_field(); ?>
+                            <input type="hidden" name="do" value="delete">
+                            <input type="hidden" name="pid" value="<?= htmlspecialchars($r['pid'], ENT_QUOTES); ?>">
+                            <button type="submit" class="btn btn-xs btn-outline-danger">Delete</button>
+                          </form>
+                        <?php elseif ($r['uses'] > 0): ?>
+                          <span class="text-muted" title="Delete blocked while <?= (int)$r['uses']; ?> record(s) still reference this pathogen">In use</span>
+                        <?php elseif (!bdsis_masters_can_write('pathogens')): ?>
+                          <span class="text-muted" title="Read-only view">&mdash;</span>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                    <?php endforeach; if (count($rows)===0): ?>
+                    <tr><td colspan="4" class="text-center text-muted p-4">No pathogens defined yet.</td></tr>
+                    <?php endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-4">
+            <?php if (bdsis_masters_can_write('pathogens')): ?>
+            <div class="card <?= $editPid !== '' ? 'card-warning' : 'card-primary'; ?> card-outline" id="editForm">
+              <div class="card-header">
+                <h3 class="card-title"><?= $editPid !== '' ? 'Rename pathogen' : 'Add a pathogen'; ?></h3>
+              </div>
+              <form method="post" action="iu-pathogens.php" autocomplete="off">
+                <?= bdsis_csrf_field(); ?>
+                <input type="hidden" name="do" value="<?= $editPid !== '' ? 'update' : 'insert'; ?>">
+                <div class="card-body">
+                  <div class="form-group">
+                    <label class="col-form-label-sm">Pathogen ID</label>
+                    <?php if ($editPid !== ''): ?>
+                      <input type="hidden" name="pid" value="<?= htmlspecialchars($editPid, ENT_QUOTES); ?>">
+                      <input type="text" class="form-control" value="<?= htmlspecialchars($editPid, ENT_QUOTES); ?>" readonly>
+                      <small class="form-text text-muted">ID is never renamed; historical records reference it by value.</small>
+                    <?php else: ?>
+                      <input type="text" name="pid" class="form-control" required maxlength="10" pattern="[A-Za-z0-9_-]+" placeholder="e.g. 027" title="Alphanumeric, dash and underscore only.">
+                      <small class="form-text text-muted">Use a fresh, unused ID. Common convention is 3 digits.</small>
+                    <?php endif; ?>
+                  </div>
+                  <div class="form-group">
+                    <label class="col-form-label-sm">Pathogen name</label>
+                    <input type="text" name="name" class="form-control" required maxlength="120" value="<?= htmlspecialchars($editName, ENT_QUOTES); ?>">
+                  </div>
+                </div>
+                <div class="card-footer">
+                  <button type="submit" class="btn <?= $editPid !== '' ? 'bg-gradient-warning' : 'bg-gradient-primary'; ?>">
+                    <?= $editPid !== '' ? 'Save changes' : 'Add pathogen'; ?>
+                  </button>
+                  <?php if ($editPid !== ''): ?>
+                    <a href="pathogens.php" class="btn btn-secondary">Cancel</a>
+                  <?php endif; ?>
+                </div>
+              </form>
+            </div>
+            <?php else: ?>
+            <div class="alert alert-secondary" style="font-size:.86rem;">
+              <strong>Read-only view.</strong> Your role can view the pathogen list but
+              cannot add, edit or delete entries. Contact a BDSIS Administrator or the
+              RCDC ICT unit for master-data changes.
+            </div>
+            <?php endif; ?>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <?php require_once __DIR__ . '/../includes/footer.php'; ?>
+</div>
+<script>
+  $(function(){
+    $('#tblPath').DataTable({ paging: true, lengthChange: false, pageLength: 25, order: [[0,'asc']], columnDefs: [{ orderable:false, targets:[3] }] });
+  });
+</script>
+</body>
+</html>

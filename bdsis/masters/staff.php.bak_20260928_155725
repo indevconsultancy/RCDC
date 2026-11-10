@@ -1,0 +1,110 @@
+<?php require_once __DIR__ . '/_inc.php'; ?>
+<?php
+/* Processing / Processed By listing. Not a master in the current design:
+   `Processed by` was moved to a free-text field by the 2026-07-21
+   `processed-by-freetext` migration (see bdsis_processed_by_label() and the
+   free-text note in lab-helpers.php). The E. coli AST staff picker still
+   backs onto commondb.user_profile_table filtered by the same acl/usercat
+   criteria the AST form uses; that filtered set is what this page shows,
+   read-only. Adds and edits belong in the shared user administration portal
+   (COMMONNEW), because a single username can be granted access to any subset
+   of the 10 sibling systems and BDSIS is not authoritative for it. */
+
+$sql = "SELECT up.username, up.fullname, up.center_id, IFNULL(hc.center_name, ''), usa.access_level, usa.user_category
+          FROM user_profile_table up
+          JOIN user_system_access_table usa ON usa.username = up.username
+          LEFT JOIN ms_health_center_table hc ON hc.center_id = up.center_id
+         WHERE usa.system_id = 6
+           AND usa.access_level IN (2, 3)
+           AND usa.user_category IN (3, 13)
+         ORDER BY up.fullname";
+$rows = array();
+$res = $commondb->query($sql);
+if ($res) {
+    while (list($un, $fn, $cid, $cn, $acl, $uc) = $res->fetch_row()) {
+        $rows[] = array('un'=>(string)$un, 'fn'=>(string)$fn, 'cid'=>(string)$cid, 'cn'=>(string)$cn, 'acl'=>(string)$acl, 'uc'=>(string)$uc);
+    }
+    $res->free();
+}
+?>
+<?php require_once __DIR__ . '/../includes/header.php'; ?>
+<?php require_once __DIR__ . '/../includes/css-jquery.php'; ?>
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+  <?php require_once __DIR__ . '/../includes/top-navbar.php'; ?>
+  <?php require_once __DIR__ . '/../includes/sidebar-menu.php'; ?>
+
+  <div class="content-wrapper">
+    <section class="content-header">
+      <div class="container-fluid">
+        <div class="row mb-2">
+          <div class="col-sm-8">
+            <h1 class="m-0">Processing Staff</h1>
+            <p class="text-muted mb-0" style="font-size:.86rem;">
+              Users offered in the E.&nbsp;coli AST staff picker &mdash; read-only
+            </p>
+          </div>
+          <div class="col-sm-4">
+            <ol class="breadcrumb float-sm-right">
+              <li class="breadcrumb-item"><a href="../dashboard/dashboard.php">Dashboard</a></li>
+              <li class="breadcrumb-item"><a href="index.php">Master Data</a></li>
+              <li class="breadcrumb-item active">Processing Staff</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="container-fluid">
+        <div class="alert alert-info" style="font-size:.9rem;">
+          <strong>Not a BDSIS master.</strong> On most sections (Microscopy, Bacteriology
+          Processed by, ELISA Processed by), <em>Processed by</em> is a free-text field &mdash;
+          the operator types whatever name they want and the display resolves it back to a
+          full name only if it happens to match a stored username. The E.&nbsp;coli AST section
+          still uses a dropdown backed by the shared user directory filtered by
+          <code>access_level IN (2,3)</code> and <code>user_category IN (3,13)</code> for
+          <code>system_id=6</code>; that filtered set is what this table shows. Add or edit users
+          in the shared administration portal (COMMONNEW) &mdash; BDSIS is not authoritative for
+          them.
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Users offered in the AST staff picker</h3></div>
+          <div class="card-body p-0">
+            <table id="tblStaff" class="table table-hover table-sm" style="width:100%;">
+              <thead>
+                <tr>
+                  <th>Full name</th><th>Username</th><th>Centre</th>
+                  <th class="text-center">Access</th><th class="text-center">Category</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($rows as $r): ?>
+                  <tr>
+                    <td><?= htmlspecialchars($r['fn'], ENT_QUOTES); ?></td>
+                    <td><code><?= htmlspecialchars($r['un'], ENT_QUOTES); ?></code></td>
+                    <td><?= htmlspecialchars($r['cn'] !== '' ? $r['cn'] : $r['cid'], ENT_QUOTES); ?></td>
+                    <td class="text-center"><span class="badge badge-info"><?= htmlspecialchars($r['acl'], ENT_QUOTES); ?></span></td>
+                    <td class="text-center"><span class="badge badge-secondary"><?= htmlspecialchars($r['uc'], ENT_QUOTES); ?></span></td>
+                  </tr>
+                <?php endforeach; if (count($rows)===0): ?>
+                  <tr><td colspan="5" class="text-center text-muted p-4">No staff match the AST filter.</td></tr>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <?php require_once __DIR__ . '/../includes/footer.php'; ?>
+</div>
+<script>
+  $(function(){
+    $('#tblStaff').DataTable({ paging: true, lengthChange: false, pageLength: 25, order: [[0,'asc']] });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+[2026-10-12 16:11:53] reg 4742 no active BFDA/DRA user is linked to this sample (entryUser=administrator, collectID=002, siteID=002) - falling back to the configured focal address(es)
+[2026-10-12 16:11:53] reg 4742 outcome=COMPLIES to=anupampal1307@gmail.com status=anupampal1307@gmail.com: DELIVERED via smtp after 1 attempt(s)
+[2026-10-12 16:12:02] FINAL OUTCOME reg 4742 outcome=Complies attempted=1 delivered=1 failed=0 status=SUCCESS ref=MPQMS-FO-4742-20261012161158
+[2026-10-12 16:12:46] reg 4742 outcome=COMPLIES SKIPPED — already notified (duplicate prevented)

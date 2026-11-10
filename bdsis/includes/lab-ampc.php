@@ -1,0 +1,1112 @@
+<?php
+/* =============================================================================
+   AmpC β-lactamase Phenotypic Test — confirmatory phenotype test for
+   Bacteriology isolates.
+   -----------------------------------------------------------------------------
+   Rendered under the existing ESBL panel inside each pathogen row's AST block.
+   Auto-opens when CTX AND CRO are BOTH Resistant on the routine antibiogram
+   (2026-10-08 spec; CAZ was dropped from the trigger list). Does NOT alter the
+   ESBL / CPE panels, their trigger lists, or their save/load pipelines in any
+   way -- this file is additive.
+
+   Panel composition:
+     CTX  Cefotaxime 30 µg   prefilled from the routine AST  (editable)
+     CRO  Ceftriaxone 30 µg  prefilled from the routine AST  (editable)
+     FOX  Cefoxitin 30 µg    manual entry                    (editable)
+     FEP  Cefepime 30 µg     prefilled from the routine AST  (editable)
+
+   All four Value inputs take manual entry: the 2026-10-10 revision dropped
+   the readonly lock on the three auto rows, so a prefill from the routine
+   ABST is a convenience the user may override whenever the bench reading
+   differs. Only the two OUTPUT pills -- the per-agent Interpretation and
+   the final AmpC phenotype -- stay readonly, because both are derived.
+
+   Per-agent interpretation (2026-10-08 revision: binary S / R, zone-only
+   rules per client spec; MIC perspective retained as binary for consistency
+   with the method dropdown):
+
+     Disc Diffusion zone (mm):
+       CTX: zone <= 22 mm -> Resistant,  else Susceptible
+       CRO: zone <= 19 mm -> Resistant,  else Susceptible
+       FOX: zone <= 14 mm -> Resistant,  else Susceptible
+       FEP: zone > 18 mm  -> Susceptible, else Resistant
+
+     MIC (µg/mL) -- binary at CLSI R thresholds:
+       CTX / CRO: MIC >= 4   -> Resistant, else Susceptible
+       FOX:       MIC >= 32  -> Resistant, else Susceptible
+       FEP:       MIC >= 16  -> Resistant, else Susceptible
+
+   A blank value / "Not Tested" row is skipped entirely -- no S or R is
+   emitted, no screening judgement is made against it.
+
+   AmpC phenotype screening (2026-10-08 revision):
+     "AmpC Suspected" when FEP = Susceptible AND
+       (CTX = Resistant OR CRO = Resistant OR FOX = Resistant).
+
+     The system NEVER auto-outputs "AmpC producer" from screening alone.
+     When screening is suspected OR any required agent is blank / Not
+     Tested, the advisory line reads:
+       "AmpC interpretation: Incomplete -- AmpC β-lactamase Phenotypic
+        Test result required."
+     The user then selects the final AmpC phenotype dropdown themselves,
+     reporting the result of the actual lab-bench phenotypic test.
+
+   Storage:
+     Overall row in bacteriology_resistance_table (ampc_triggered /
+     _trigger_agents / _result -- added by db-migrations/2026-10-01-ampc-test.sql).
+     Per-agent methods/zones/results in bacteriology_ampc_table (mirror of
+     bacteriology_esbl_table).
+
+   Defensive: every DB call probes `bacteriology_ampc_table` existence first.
+   Deploying this PHP before the migration runs is safe -- the panel renders
+   and the client-side interpretations work, but save becomes a silent no-op
+   until the migration is applied.
+   ============================================================================= */
+
+if (!defined('BDSIS_LAB_AMPC_LOADED')) {
+    define('BDSIS_LAB_AMPC_LOADED', 1);
+}
+
+if (!function_exists('bdsis_ampc_agents')) {
+    /** Order is the panel's visual order. `source` = auto|manual (yellow/blue). */
+    function bdsis_ampc_agents()
+    {
+        return array(
+            'CTX' => array('name' => 'Cefotaxime',  'content' => '30 µg', 'source' => 'auto'),
+            'CRO' => array('name' => 'Ceftriaxone', 'content' => '30 µg', 'source' => 'auto'),
+            'FOX' => array('name' => 'Cefoxitin',   'content' => '30 µg', 'source' => 'manual'),
+            /* 2026-10-10 revision: FEP is auto-pulled from the routine ABST
+               Cefepime reading again (reverting the brief 2026-10-08 manual-
+               FEP period). The method dropdown still offers Disc approximation
+               method / E Test / MIC per bdsis_ampc_methods_for_agent(), so the
+               user can still change the interpretation perspective when the
+               bench ran a MIC / E-Test; the raw value simply pre-fills from
+               the ABST reading above. AMPC_AUTO_SOURCES in lab.php re-adds
+               'FEP' so bpAmpcApply() prefills the zone on sync. */
+            'FEP' => array('name' => 'Cefepime',    'content' => '30 µg', 'source' => 'auto'),
+        );
+    }
+}
+
+if (!function_exists('bdsis_ampc_methods')) {
+    /**
+     * Legacy union of all method options across the four agents. Kept for
+     * callers (and save-side allowlists) that validate "any accepted
+     * method". Per-agent dropdowns are now built from
+     * bdsis_ampc_methods_for_agent() so each row shows only its
+     * applicable methods. PCR is excluded per the 2026-10-06 directive.
+     */
+    function bdsis_ampc_methods()
+    {
+        return array('Disc Diffusion', 'Disc approximation method', 'E Test', 'MIC');
+    }
+}
+
+if (!function_exists('bdsis_ampc_methods_for_agent')) {
+    /**
+     * Per-agent method list.
+     *   CTX / CRO: Disc Diffusion (default) + MIC -- values auto-pulled from
+     *              the routine antibiogram so the perspective is dictated by
+     *              how that ABST was run.
+     *   FOX / FEP: Disc Diffusion / Disc approximation method / E Test / MIC.
+     *              2026-10-12: 'Disc Diffusion' added so a lab running a
+     *              standard DD panel (not the specialized cloverleaf
+     *              disc-approximation technique) can pick it from the
+     *              dropdown. Previously the option list omitted DD, so any
+     *              record whose FOX/FEP method had been saved as
+     *              'Disc Diffusion' (through an earlier panel revision or
+     *              a cross-agent habit) could not reselect on reload: the
+     *              dropdown fell back to "Select Method" and the next save
+     *              overwrote the method to blank. 'Disc Diffusion' interprets
+     *              under the DD perspective (same as 'Disc approximation
+     *              method'), so the clinical reading is identical. PCR is
+     *              NOT offered on any agent.
+     *
+     * @param  string $code  CTX / CRO / FOX / FEP
+     * @return array
+     */
+    function bdsis_ampc_methods_for_agent($code)
+    {
+        $code = strtoupper(trim((string)$code));
+        if ($code === 'CTX' || $code === 'CRO') {
+            return array('Disc Diffusion', 'MIC');
+        }
+        return array('Disc Diffusion', 'Disc approximation method', 'E Test', 'MIC');
+    }
+}
+
+if (!function_exists('bdsis_ampc_default_method')) {
+    /** Default method for a fresh (blank) agent row -- controls the
+     *  pre-selected dropdown option when no saved value exists. */
+    function bdsis_ampc_default_method($code)
+    {
+        $code = strtoupper(trim((string)$code));
+        if ($code === 'CTX' || $code === 'CRO') { return 'Disc Diffusion'; }
+        return '';   /* FOX / FEP leave the user to pick */
+    }
+}
+
+if (!function_exists('bdsis_ampc_perspective_for_method')) {
+    /**
+     * Which numeric scale a given method reports:
+     *   DD  -> value is a zone diameter in mm   (bigger = more susceptible)
+     *   MIC -> value is an MIC in µg/mL         (bigger = more resistant)
+     *
+     * "Disc Diffusion" and "Disc approximation method" are DD; "MIC" and
+     * "E Test" are MIC. Any legacy value defaults to DD so pre-2026-10-08
+     * records interpret the way they always did.
+     *
+     * @param  string $method
+     * @return string 'DD' | 'MIC'
+     */
+    function bdsis_ampc_perspective_for_method($method)
+    {
+        $m = strtolower(trim((string)$method));
+        if ($m === 'mic')                              { return 'MIC'; }
+        if ($m === 'e test' || $m === 'e-test')        { return 'MIC'; }
+        return 'DD';
+    }
+}
+
+if (!function_exists('bdsis_ampc_interpretations')) {
+    /** Per-agent interpretation options (2026-10-08 revision: binary S / R;
+     *  Intermediate removed per the client's updated spec). */
+    function bdsis_ampc_interpretations()
+    {
+        return array('Susceptible', 'Resistant');
+    }
+}
+
+if (!function_exists('bdsis_ampc_phenotype_options')) {
+    /** Final AmpC phenotype outcomes. The user picks this manually on the
+     *  final dropdown AFTER running the lab-bench phenotypic test; the
+     *  system never auto-promotes screening into "AmpC producer". */
+    function bdsis_ampc_phenotype_options()
+    {
+        return array('AmpC producer', 'AmpC negative');
+    }
+}
+
+if (!function_exists('bdsis_ampc_incomplete_message')) {
+    /** Exact wording the client requires when the test is partial. */
+    function bdsis_ampc_incomplete_message()
+    {
+        return 'AmpC interpretation: Incomplete – AmpC β-lactamase Phenotypic Test result required.';
+    }
+}
+
+if (!function_exists('bdsis_ampc_trigger_codes')) {
+    /**
+     * AST antibiotics that -- when ALL Resistant together -- open the AmpC
+     * panel. 2026-10-08 spec: CTX AND CRO (CAZ was dropped).
+     */
+    function bdsis_ampc_trigger_codes() { return array('CTX', 'CRO'); }
+}
+
+if (!function_exists('bdsis_ampc_breakpoints')) {
+    /**
+     * Binary breakpoints for AmpC agent interpretation (2026-10-08
+     * revision; the earlier S/I/R band table was collapsed back to S/R
+     * per the client's updated zone-only spec).
+     *
+     * Disc Diffusion returns `r_max` -- R when value <= r_max, S when
+     *   value > r_max. One exception: FEP uses "zone > 18 -> S else R"
+     *   so its DD cut-off is encoded as r_max = 18 and the branch below
+     *   reads "S when > r_max, else R" uniformly (same meaning).
+     *
+     * MIC returns `r_min` -- R when value >= r_min, S when value < r_min.
+     *
+     * @param  string $code         CTX / CRO / FOX / FEP
+     * @param  string $perspective  'DD' | 'MIC'
+     * @return array|null           bands, or null when the pair is unknown
+     */
+    function bdsis_ampc_breakpoints($code, $perspective)
+    {
+        static $tbl = array(
+            'DD' => array(
+                'CTX' => array('r_max' => 22),
+                'CRO' => array('r_max' => 19),
+                'FOX' => array('r_max' => 14),
+                'FEP' => array('r_max' => 18),
+            ),
+            'MIC' => array(
+                'CTX' => array('r_min' => 4),
+                'CRO' => array('r_min' => 4),
+                'FOX' => array('r_min' => 32),
+                'FEP' => array('r_min' => 16),
+            ),
+        );
+        $code = strtoupper(trim((string)$code));
+        $p    = ($perspective === 'MIC') ? 'MIC' : 'DD';
+        return isset($tbl[$p][$code]) ? $tbl[$p][$code] : null;
+    }
+}
+
+if (!function_exists('bdsis_ampc_resistant_cutoff')) {
+    /**
+     * Back-compat shim retained for callers that read the old DD cut-off
+     * (bdsis_ampc_panel_html's legacy cutoff hint, and any third-party
+     * code). Returns the DD R-max in mm.
+     */
+    function bdsis_ampc_resistant_cutoff($code)
+    {
+        $bp = bdsis_ampc_breakpoints($code, 'DD');
+        return ($bp && isset($bp['r_max'])) ? (int)$bp['r_max'] : null;
+    }
+}
+
+if (!function_exists('bdsis_ampc_interpret_agent')) {
+    /**
+     * Per-agent interpretation (2026-10-08 revision: binary S / R).
+     * Returns Susceptible / Resistant from the raw value + the method's
+     * perspective; empty string when the value is blank or unparseable
+     * (that row is treated as "Not Tested" and the screen bypasses it).
+     *
+     * Rules per the client spec (zone, mm):
+     *   FEP: value > 18 mm   -> Susceptible, else Resistant
+     *   CTX: value <= 22 mm  -> Resistant,   else Susceptible
+     *   CRO: value <= 19 mm  -> Resistant,   else Susceptible
+     *   FOX: value <= 14 mm  -> Resistant,   else Susceptible
+     *
+     * MIC (binary at CLSI R threshold):
+     *   CTX / CRO: MIC >= 4   -> Resistant, else Susceptible
+     *   FOX:       MIC >= 32  -> Resistant, else Susceptible
+     *   FEP:       MIC >= 16  -> Resistant, else Susceptible
+     *
+     * @param  string $code    CTX / CRO / FOX / FEP
+     * @param  mixed  $value   zone (mm) or MIC (µg/mL) -- scalar or string
+     * @param  string $method  'Disc Diffusion' | 'Disc approximation method'
+     *                         | 'E Test' | 'MIC' (optional; defaults to DD)
+     * @return string          'Susceptible' | 'Resistant' | ''
+     */
+    function bdsis_ampc_interpret_agent($code, $value, $method = 'Disc Diffusion')
+    {
+        if ($value === null) { return ''; }
+        $s = trim((string)$value);
+        if ($s === '') { return ''; }
+        /* 2026-10-12: accept clinical MIC notation with comparator prefixes
+           ("<=0.5", ">16", ">=2", "<0.25") alongside plain numeric strings.
+           We extract the FIRST numeric token for the breakpoint comparison;
+           the raw string stays in bacteriology_ampc_table.zone_diameter
+           (now VARCHAR -- see bdsis_ampc_zone_varchar_ensure) so edit mode
+           re-renders the operator exactly as the lab typed it. */
+        if (!preg_match('/\d+(?:\.\d+)?/', $s, $m)) { return ''; }
+        $v = (float)$m[0];
+        if ($v < 0) { return ''; }
+        $perspective = bdsis_ampc_perspective_for_method($method);
+        $bp = bdsis_ampc_breakpoints($code, $perspective);
+        if (!$bp) { return ''; }
+        if ($perspective === 'DD') {
+            /* Zone: larger = more susceptible. The ≤ r_max band is Resistant;
+               anything strictly greater is Susceptible. Matches the client's
+               "FEP > 18 -> S else R" / "CTX <= 22 -> R else S" / etc. rules
+               uniformly because r_max = 18/22/19/14. */
+            return ($v <= $bp['r_max']) ? 'Resistant' : 'Susceptible';
+        }
+        /* MIC: larger = more resistant. */
+        return ($v >= $bp['r_min']) ? 'Resistant' : 'Susceptible';
+    }
+}
+
+if (!function_exists('bdsis_ampc_overall')) {
+    /**
+     * Final AmpC phenotype (2026-10-08 revision, auto-computed per the
+     * client's updated spec):
+     *
+     *   AmpC producer when:
+     *     FEP = Susceptible AND
+     *       (CTX = Resistant OR CRO = Resistant OR FOX = Resistant)
+     *
+     *   AmpC negative when all four agents are tested but the rule above
+     *   does not fire.
+     *
+     *   '' (blank) when the test is incomplete -- any of the four agents
+     *   is blank / Not Tested. The caller surfaces the exact message
+     *   bdsis_ampc_incomplete_message() in that case.
+     *
+     * Per-agent interpretation is binary S / R, drawn from the method's
+     * perspective (DD zone or MIC) via bdsis_ampc_interpret_agent().
+     *
+     * Backward-compat: accepts either
+     *   (a) the full agents dict  (code => array('method','zone','result'))
+     *   (b) a simple code => S/R map
+     *   (c) the legacy code => 'AmpC producer' map -- degraded to shape (b)
+     *       if possible; otherwise returns '' (unknown).
+     *
+     * @param  array $agents  per-agent data as described above
+     * @return string         'AmpC producer' | 'AmpC negative' | '' (incomplete)
+     */
+    function bdsis_ampc_overall($agents)
+    {
+        if (!is_array($agents) || count($agents) === 0) { return ''; }
+        $required = array('CTX', 'CRO', 'FOX', 'FEP');
+
+        /* Normalise to a code => S/R string map, re-deriving from the raw
+           value where the stored result is empty or an older vocabulary.
+           The row's method is passed through so a MIC-perspective reading
+           interprets against the MIC band table rather than the DD one. */
+        $results = array();
+        foreach ($required as $code) {
+            if (!isset($agents[$code])) { return ''; /* incomplete */ }
+            $row = $agents[$code];
+            if (is_array($row)) {
+                $zone   = isset($row['zone'])   ? trim((string)$row['zone'])   : '';
+                $method = isset($row['method']) ? trim((string)$row['method']) : '';
+                if ($zone === '') { return ''; /* not tested */ }
+                $r = isset($row['result']) ? trim((string)$row['result']) : '';
+                /* Accept S / R as stored; Intermediate (from older records)
+                   collapses to R so the screening judgement stays strict. */
+                if ($r === 'Intermediate') { $r = 'Resistant'; }
+                if (!in_array($r, array('Susceptible', 'Resistant'), true)) {
+                    $r = bdsis_ampc_interpret_agent($code, $zone, $method);
+                }
+                if ($r === '') { return ''; /* value unparseable → incomplete */ }
+                $results[$code] = $r;
+            } else {
+                $r = trim((string)$row);
+                if ($r === '') { return ''; }
+                /* Older callers passed 'AmpC producer' / 'AmpC negative';
+                   map those back to R / S for FEP / CTX / CRO / FOX. */
+                if ($r === 'AmpC producer') { $r = 'Resistant'; }
+                elseif ($r === 'AmpC negative') { $r = 'Susceptible'; }
+                if ($r === 'Intermediate') { $r = 'Resistant'; }
+                $results[$code] = $r;
+            }
+        }
+
+        $fepS = ($results['FEP'] === 'Susceptible');
+        $anyR = ($results['CTX'] === 'Resistant')
+             || ($results['CRO'] === 'Resistant')
+             || ($results['FOX'] === 'Resistant');
+
+        return ($fepS && $anyR) ? 'AmpC producer' : 'AmpC negative';
+    }
+}
+
+if (!function_exists('bdsis_ampc_is_triggered')) {
+    /**
+     * Does the posted AST antibiogram trip the AmpC panel? Requires BOTH
+     * CTX and CRO to be Resistant on this isolate (2026-10-08 spec; CAZ
+     * is no longer a trigger).
+     *
+     * @param  array  $astResults  antimicrobial_code => interpretation
+     * @return array|false         list of trigger codes present, else false
+     */
+    function bdsis_ampc_is_triggered($astResults)
+    {
+        if (!is_array($astResults)) { return false; }
+        $triggers = bdsis_ampc_trigger_codes();
+        $hit = array();
+        foreach ($triggers as $t) {
+            if (!isset($astResults[$t]) || $astResults[$t] !== 'Resistant') { return false; }
+            $hit[] = $t;
+        }
+        return $hit;
+    }
+}
+
+if (!function_exists('bdsis_ampc_table_exists')) {
+    /** Memoised probe: true iff db-migrations/2026-10-01-ampc-test.sql has run. */
+    function bdsis_ampc_table_exists($bdsis)
+    {
+        static $exists = null;
+        if ($exists !== null) { return $exists; }
+        $exists = false;
+        if (!($bdsis instanceof mysqli)) { return false; }
+        $q = @$bdsis->query("SHOW TABLES LIKE 'bacteriology_ampc_table'");
+        if ($q && $q->num_rows > 0) { $exists = true; }
+        if ($q) { $q->free(); }
+        return $exists;
+    }
+}
+
+if (!function_exists('bdsis_ampc_zone_varchar_ensure')) {
+    /**
+     * Idempotent 2026-10-12 migration: converts
+     * bacteriology_ampc_table.zone_diameter from DECIMAL(6,2) to VARCHAR(20)
+     * so the column can hold clinical MIC notation with comparator prefixes
+     * ("<=0.5", ">16") instead of just numeric literals. Existing decimal
+     * values convert to their string form on the ALTER (e.g. 10.50 ->
+     * "10.50"); the interpretation path extracts the first numeric token
+     * from either representation so S/R math is unchanged.
+     *
+     * Memoises a TRUE result only, so a failed ALTER (e.g. the DB account
+     * doesn't hold ALTER TABLE) is retried next request. Mirrors
+     * db-migrations/2026-10-12-ampc-zone-varchar.sql exactly, so applying
+     * the SQL manually first makes this a no-op.
+     *
+     * @return bool  true iff the column is now VARCHAR
+     */
+    function bdsis_ampc_zone_varchar_ensure($bdsis)
+    {
+        static $ok = null;
+        if ($ok === true) { return true; }
+        if (!($bdsis instanceof mysqli)) { return false; }
+        if (!bdsis_ampc_table_exists($bdsis)) { return false; }
+        $q = @$bdsis->query("SHOW COLUMNS FROM bacteriology_ampc_table LIKE 'zone_diameter'");
+        if (!$q || $q->num_rows === 0) { if ($q) { $q->free(); } return false; }
+        $row = $q->fetch_assoc(); $q->free();
+        $type = strtolower((string)$row['Type']);
+        if (strpos($type, 'varchar') !== false || strpos($type, 'char') === 0 || strpos($type, 'text') !== false) {
+            $ok = true; return true;
+        }
+        if (!@$bdsis->query("ALTER TABLE bacteriology_ampc_table MODIFY COLUMN zone_diameter VARCHAR(20) NULL")) {
+            return false;
+        }
+        $ok = true; return true;
+    }
+}
+
+if (!function_exists('bdsis_ampc_owner_column_ensure')) {
+    /**
+     * Idempotent 2026-10-16 migration: adds bacteriology_ampc_table.owner.
+     *
+     * The per-agent AmpC rows are keyed by brt2_id alone. Once the E. coli AST
+     * panel started storing AmpC (its MIC method now renders the same
+     * confirmatory cascade), that id column carries TWO unrelated id spaces:
+     * a bacteriology isolate's bacteriology_result_table2.record_id and an
+     * E. coli pathotype's rcdc_ecoli_pcr_result_table3.record_id. They collide
+     * freely -- saving AmpC for pathotype 42 deleted and overwrote the agent
+     * rows of bacteriology isolate 42, i.e. another subject's result.
+     *
+     * 'owner' separates them, defaulting to 'bact' so every row already stored
+     * keeps its current meaning and the bacteriology path is unchanged.
+     *
+     * Memoises a TRUE result only, so a failed ALTER (e.g. the DB account
+     * holds no ALTER TABLE) is retried on the next request. Mirrors
+     * db-migrations/2026-10-16-ampc-owner-scope.sql, so applying that SQL
+     * by hand first makes this a no-op.
+     *
+     * @return bool  true iff the column is present
+     */
+    function bdsis_ampc_owner_column_ensure($bdsis)
+    {
+        static $ok = null;
+        if ($ok === true) { return true; }
+        if (!($bdsis instanceof mysqli)) { return false; }
+        if (!bdsis_ampc_table_exists($bdsis)) { return false; }
+        $q = @$bdsis->query("SHOW COLUMNS FROM bacteriology_ampc_table LIKE 'owner'");
+        $has = ($q && $q->num_rows > 0);
+        if ($q) { $q->free(); }
+        if ($has) { $ok = true; return true; }
+        if (!@$bdsis->query("ALTER TABLE bacteriology_ampc_table
+                               ADD COLUMN `owner` VARCHAR(10) NOT NULL DEFAULT 'bact' AFTER `brt2_id`,
+                               ADD KEY `idx_owner_brt2` (`owner`, `brt2_id`)")) {
+            return false;
+        }
+        $ok = true; return true;
+    }
+}
+
+if (!function_exists('bdsis_ampc_owner_key')) {
+    /**
+     * The owner tag one of the two id spaces stores under. Anything that is
+     * not the E. coli panel is a bacteriology isolate, which is also what
+     * every row written before the owner column existed is.
+     *
+     * @return string 'bact' | 'ecoli'
+     */
+    function bdsis_ampc_owner_key($owner)
+    {
+        return ((string)$owner === 'ecoli') ? 'ecoli' : 'bact';
+    }
+}
+
+if (!function_exists('bdsis_ampc_panel_html')) {
+    /**
+     * The AmpC sub-card HTML, rendered inside a pathogen row's AST block
+     * right after the ESBL and CPE panels.
+     *
+     * $saved shape (or null when nothing has been stored):
+     *   array(
+     *     'triggered_by' => array('CTX','CRO'),
+     *     'result'       => 'AmpC producer' | 'AmpC negative',
+     *     'agents'       => array(
+     *       'CTX' => array('method'=>..., 'zone'=>..., 'result'=>...),
+     *       'CRO' => ...,
+     *       'FOX' => ...,
+     *       'FEP' => ...,
+     *     ),
+     *   )
+     *
+     * @return string
+     */
+    function bdsis_ampc_panel_html($idx, $saved)
+    {
+        $hv = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $s  = (is_array($saved) && !empty($saved)) ? $saved : null;
+        $agents  = bdsis_ampc_agents();
+        $interps = bdsis_ampc_interpretations();
+
+        $sel = function ($name, $id, $opts, $cur, $placeholder, $attrs = '', $cls = '') use ($hv) {
+            $out = '<select class="form-control'.($cls !== '' ? ' '.$cls : '').'" name="'.$name.'" id="'.$id.'" '.$attrs.'>';
+            $out .= '<option value="">'.$hv($placeholder).'</option>';
+            foreach ($opts as $o) {
+                $out .= '<option value="'.$hv($o).'"'.((string)$o === (string)$cur ? ' selected' : '').'>'.$hv($o).'</option>';
+            }
+            return $out . '</select>';
+        };
+
+        /* 2026-10-08 spec: column heading reads "Value (mm / µg/mL)" because
+           the input is now dual-perspective -- Disc Diffusion / Disc
+           approximation methods report zone in mm, MIC / E Test report MIC
+           in µg/mL. bp-ampc-value-unit on the row updates its label when
+           the method dropdown changes. */
+        $gridHead = '<div class="row lr-grid-head d-none d-md-flex">'
+                  . '<div class="col-md-3">Antibiotic</div>'
+                  . '<div class="col-md-3">Method</div>'
+                  . '<div class="col-md-2">Value <small>(mm / &micro;g/mL)</small></div>'
+                  . '<div class="col-md-4">Interpretation</div></div>';
+
+        $h  = '<div class="lr-reveal bp-ampc" id="bpAmpc'.$idx.'" style="display:'.($s ? 'block' : 'none').';">';
+        $h .= '<div class="lr-subcard lr-subcard--ampc">';
+        $h .= '<div class="lr-subcard__head"><h4 class="lr-subcard__title">AmpC &beta;-lactamase Phenotypic Test</h4>'
+            . '<span class="lr-trigger"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i>'
+            . 'Required &mdash; <span class="bp-ampc-why">'
+            . $hv($s ? implode(', ', (array)$s['triggered_by']) : 'CTX, CRO')
+            . '</span> Resistant</span></div>';
+        $h .= $gridHead;
+
+        foreach ($agents as $code => $ag) {
+            $cur = ($s && isset($s['agents'][$code])) ? $s['agents'][$code] : array('method'=>'', 'zone'=>'', 'result'=>'');
+            if ($code === 'FOX' && $s) {
+                if (empty($cur['method']) && !empty($s['ampc_fox_method'])) { $cur['method'] = $s['ampc_fox_method']; }
+                if ($cur['zone'] === '' && isset($s['ampc_fox_val']) && $s['ampc_fox_val'] !== '') { $cur['zone'] = $s['ampc_fox_val']; }
+                elseif ($cur['zone'] === '' && isset($s['ampc_fox_value']) && $s['ampc_fox_value'] !== '') { $cur['zone'] = $s['ampc_fox_value']; }
+                if (empty($cur['result']) && !empty($s['ampc_fox_int'])) { $cur['result'] = $s['ampc_fox_int']; }
+            } elseif ($code === 'FEP' && $s) {
+                if (empty($cur['method']) && !empty($s['ampc_fep_method'])) { $cur['method'] = $s['ampc_fep_method']; }
+                if ($cur['zone'] === '' && isset($s['ampc_fep_val']) && $s['ampc_fep_val'] !== '') { $cur['zone'] = $s['ampc_fep_val']; }
+                elseif ($cur['zone'] === '' && isset($s['ampc_fep_value']) && $s['ampc_fep_value'] !== '') { $cur['zone'] = $s['ampc_fep_value']; }
+                if (empty($cur['result']) && !empty($s['ampc_fep_int'])) { $cur['result'] = $s['ampc_fep_int']; }
+            }
+            $mId = 'bpAmpcMethod'.$idx.'_'.$code;
+            $zId = 'bpAmpcZone'.$idx.'_'.$code;
+            $rId = 'bpAmpcResult'.$idx.'_'.$code;
+            $isAuto = ($ag['source'] === 'auto');
+            /* 2026-10-10 revision: all four Value inputs are now editable.
+               The auto rows (CTX / CRO / FEP) still get prefilled from the
+               routine ABST reading when the field is empty -- a convenience,
+               not a lock. The user can override whenever the bench reading
+               differs or when the routine ABST was MIC (DD prefill does not
+               apply). The data-ampc-source attribute is retained so the CSS
+               keeps the "yellow" background on auto rows as a visual hint
+               that the value was pre-populated, and bpAmpcApply() in lab.php
+               keys off it to decide whether to prefill. */
+            $zoneAttrs = $isAuto
+                ? ' data-ampc-source="auto" min="0" title="Prefilled from the ABST reading above — edit if the bench reading differs."'
+                : ' data-ampc-source="manual" min="0"';
+            $zoneClass = 'form-control text-center bp-ampc-zone'
+                       . ($isAuto ? ' bp-ampc-zone--auto' : ' bp-ampc-zone--manual');
+
+            /* Per-agent method list + default pre-selection (2026-10-08). */
+            $methodOpts    = bdsis_ampc_methods_for_agent($code);
+            $defaultMethod = bdsis_ampc_default_method($code);
+            $curMethod     = (string)$cur['method'];
+            if ($curMethod === '' && $defaultMethod !== '' && in_array($defaultMethod, $methodOpts, true)) {
+                $curMethod = $defaultMethod;
+            }
+            /* 2026-10-12 safety net: if the saved method is a legacy or
+               cross-agent value that is NOT in this agent's current option
+               list, append it so the dropdown can preselect it on reload.
+               Without this, the "selected" marker never attaches, the
+               dropdown falls back to the empty placeholder, and the next
+               Save silently overwrites the stored method to blank. The
+               wider bdsis_ampc_methods() allowlist still gates server-side
+               interpretation, so no invalid method text can sneak in. */
+            if ($curMethod !== '' && !in_array($curMethod, $methodOpts, true)) {
+                $methodOpts[] = $curMethod;
+            }
+
+            /* Cut-off hint spans both perspectives; a tooltip is small, so
+               it just reads the binary bands matching the 2026-10-08 S/R
+               interpretation (bdsis_ampc_breakpoints now returns only
+               r_max for DD and r_min for MIC -- the Intermediate band was
+               removed). FEP is the one agent whose DD rule reads as
+               "> r_max -> S else R" rather than "<= r_max -> R else S";
+               the hint reflects that direction for FEP. */
+            $bpDd  = bdsis_ampc_breakpoints($code, 'DD');
+            $bpMic = bdsis_ampc_breakpoints($code, 'MIC');
+            $cutoffHint = '';
+            if ($bpDd && isset($bpDd['r_max']) && $bpMic && isset($bpMic['r_min'])) {
+                $ddR    = (int)$bpDd['r_max'];
+                $micR   = $bpMic['r_min'];
+                $ddHint = ($code === 'FEP')
+                    ? sprintf('DD: zone &gt; %d mm &rarr; S, else R.', $ddR)
+                    : sprintf('DD: zone &le; %d mm &rarr; R, else S.', $ddR);
+                $cutoffHint = $ddHint . ' MIC: &ge; ' . (string)$micR . ' &micro;g/mL &rarr; R, else S.';
+            }
+
+            $h .= '<div class="row lr-line" data-ampc-code="'.$hv($code).'">';
+            /* 2026-10-14 UI cleanup: the "Prefilled from ABST / entered manually"
+               sub-label was dropped -- the same wording is already on the Value
+               input's own title tooltip, so it was duplicated on every row. */
+            $h .= '<div class="col-md-3 lr-cell lr-cell--name">'
+                . '<span class="lr-agent">'.$hv($code).' <small>'.$hv($ag['content']).'</small> '.$hv($ag['name']).'</span></div>';
+            $h .= '<div class="col-md-3 lr-cell"><label class="lr-cell-label" for="'.$mId.'">Method:</label>'
+                . $sel('ampc_method['.$idx.']['.$code.']', $mId, $methodOpts, $curMethod,
+                       'Select Method',
+                       'data-ampc-code="'.$hv($code).'" onchange="bpAmpcInterpret(\''.$idx.'\');"',
+                       'bp-ampc-method')
+                . '</div>';
+            /* The unit label switches between "mm" and "µg/mL" based on the
+               method dropdown; the JS tracks every change. Default copy is
+               the DD unit so the label is sensible before the JS runs. */
+            /* 2026-10-12: type="text" + inputmode="decimal" so the input
+               accepts clinical MIC notation with comparator prefixes
+               (<=0.5, >16, >=2, <0.25) alongside plain numeric strings.
+               bdsis_ampc_interpret_agent() + bpAmpcInterpretCode() both
+               extract the first numeric token for S/R; the raw string is
+               stored verbatim in bacteriology_ampc_table.zone_diameter
+               (VARCHAR after bdsis_ampc_zone_varchar_ensure). */
+            $h .= '<div class="col-6 col-md-2 lr-cell"><label class="lr-cell-label" for="'.$zId.'">Value <span class="bp-ampc-value-unit" data-ampc-unit-for="'.$hv($code).'">(mm)</span>:</label>'
+                . '<input type="text" inputmode="decimal" name="ampc_zone['.$idx.']['.$code.']" id="'.$zId.'"'
+                . ' class="'.$zoneClass.'" data-code="'.$hv($code).'"'
+                . ' value="'.$hv($cur['zone']).'" oninput="bpAmpcInterpret(\''.$idx.'\');"'
+                . $zoneAttrs.' /></div>';
+            $h .= '<div class="col-6 col-md-4 lr-cell"><label class="lr-cell-label" for="'.$rId.'">Interpretation:</label>'
+                . '<input type="text" class="form-control lr-pill bp-ampc-agent-result" id="'.$rId.'"'
+                . ' name="ampc_agent_result['.$idx.']['.$code.']" value="'.$hv($cur['result']).'"'
+                . ' readonly tabindex="-1" title="'.$cutoffHint.'" /></div>';
+            $h .= '</div>';
+
+            if ($code === 'FOX') {
+                $h .= '<input type="hidden" name="ampc_fox_method['.$idx.']" id="ampc_fox_method_'.$idx.'" value="'.$hv($curMethod).'" />'
+                    . '<input type="hidden" name="ampc_fox_val['.$idx.']" id="ampc_fox_val_'.$idx.'" value="'.$hv($cur['zone']).'" />'
+                    . '<input type="hidden" name="ampc_fox_value['.$idx.']" id="ampc_fox_value_'.$idx.'" value="'.$hv($cur['zone']).'" />'
+                    . '<input type="hidden" name="ampc_fox_int['.$idx.']" id="ampc_fox_int_'.$idx.'" value="'.$hv($cur['result']).'" />';
+            } elseif ($code === 'FEP') {
+                $h .= '<input type="hidden" name="ampc_fep_method['.$idx.']" id="ampc_fep_method_'.$idx.'" value="'.$hv($curMethod).'" />'
+                    . '<input type="hidden" name="ampc_fep_val['.$idx.']" id="ampc_fep_val_'.$idx.'" value="'.$hv($cur['zone']).'" />'
+                    . '<input type="hidden" name="ampc_fep_value['.$idx.']" id="ampc_fep_value_'.$idx.'" value="'.$hv($cur['zone']).'" />'
+                    . '<input type="hidden" name="ampc_fep_int['.$idx.']" id="ampc_fep_int_'.$idx.'" value="'.$hv($cur['result']).'" />';
+            }
+        }
+
+        /* Final AmpC phenotype -- auto-computed (2026-10-08 revised spec).
+           The pill carries the live computed value from bdsis_ampc_overall()
+           on first paint and from bpAmpcInterpret() on every input event:
+             FEP = Susceptible AND (CTX = R OR CRO = R OR FOX = R)
+                                               -> "AmpC producer"
+             else (all four tested, criteria not met)
+                                               -> "AmpC negative"
+             any of CTX / CRO / FOX / FEP blank or Not Tested
+                                               -> incomplete message
+                                                  (bdsis_ampc_incomplete_message()). */
+        $savedResult = ($s && isset($s['result'])) ? trim((string)$s['result']) : '';
+        if ($savedResult === '' && $s && !empty($s['ampc_phenotype_result'])) {
+            $savedResult = trim((string)$s['ampc_phenotype_result']);
+        }
+        if ($savedResult === '' && $s && isset($s['agents']) && is_array($s['agents'])) {
+            /* First-paint fallback for edit pages: if the record stored no
+               final result (older schema or clear-and-reload), compute it
+               from the per-agent data so the pill shows the right text
+               before the client-side script runs. */
+            $computed = bdsis_ampc_overall($s['agents']);
+            if ($computed === '') { $savedResult = bdsis_ampc_incomplete_message(); }
+            else                   { $savedResult = $computed; }
+        }
+
+        /* 2026-10-14 UI cleanup: the paragraph that restated the derivation rule
+           and quoted the Incomplete message moved onto the pill's own tooltip.
+           The pill DISPLAYS the incomplete message when the test is partial, so
+           printing it a second time as static prose told the technician nothing
+           the field was not already saying. */
+        $finalHint = 'Auto-derived: AmpC producer when FEP is Susceptible and any of CTX / CRO / FOX is Resistant; '
+                   . 'otherwise AmpC negative. Blank or untested agent leaves the result incomplete.';
+        $h .= '<div class="row lr-line lr-line--result">'
+            . '<div class="col-md-8 lr-cell lr-cell--name"><span class="lr-agent">AmpC phenotype <span class="required-star" aria-hidden="true">*</span></span></div>'
+            . '<div class="col-md-4 lr-cell"><label class="lr-cell-label" for="bpAmpcResult'.$idx.'">AmpC phenotype:</label>'
+            . '<input type="text" class="form-control lr-pill bp-ampc-final" id="bpAmpcResult'.$idx.'"'
+            . ' name="ampc_result['.$idx.']" value="'.$hv($savedResult).'"'
+            . ' readonly tabindex="-1" title="'.$hv($finalHint).'" placeholder="Pending" />'
+            . '<input type="hidden" name="ampc_phenotype_result['.$idx.']" id="ampc_phenotype_result_'.$idx.'" value="'.$hv($savedResult).'" />'
+            . '</div></div>';
+
+        /* 2026-10-14 UI cleanup: the full breakpoint recital is gone. Every
+           per-agent rule it listed is already on that row's Interpretation
+           pill as $cutoffHint (hover), and the combination rule is now on the
+           final phenotype pill's tooltip above -- so no rule was lost, it just
+           stopped occupying a paragraph on every pathogen row. */
+        $h .= '</div></div>';
+        return $h;
+    }
+}
+
+if (!function_exists('bdsis_ampc_has_post')) {
+    /** Check if any AmpC field is present in the post data for this row. */
+    function bdsis_ampc_has_post($rowIdx, $post)
+    {
+        if (isset($post['ampc_zone'][$rowIdx]) && is_array($post['ampc_zone'][$rowIdx])) {
+            foreach ($post['ampc_zone'][$rowIdx] as $zv) {
+                if (trim((string)$zv) !== '') { return true; }
+            }
+        }
+        foreach (array('ampc_fox_val', 'ampc_fox_value', 'ampc_fep_val', 'ampc_fep_value') as $k) {
+            if (isset($post[$k][$rowIdx]) && trim((string)$post[$k][$rowIdx]) !== '') { return true; }
+            if (isset($post[$k]) && is_string($post[$k]) && trim($post[$k]) !== '') { return true; }
+        }
+        foreach (array('ampc_fox_method', 'ampc_fep_method') as $k) {
+            if (isset($post[$k][$rowIdx]) && trim((string)$post[$k][$rowIdx]) !== '') { return true; }
+            if (isset($post[$k]) && is_string($post[$k]) && trim($post[$k]) !== '') { return true; }
+        }
+        return false;
+    }
+}
+
+if (!function_exists('bdsis_ampc_parse_post')) {
+    /**
+     * Build a save plan for one pathogen row from $_POST. Returns null when
+     * no agent in that row carries a method, zone or result.
+     *
+     * @return array|null
+     */
+    function bdsis_ampc_parse_post($rowIdx, $post, $triggeredBy = null)
+    {
+        $method = (isset($post['ampc_method'][$rowIdx]) && is_array($post['ampc_method'][$rowIdx])) ? $post['ampc_method'][$rowIdx] : array();
+        $zone   = (isset($post['ampc_zone'][$rowIdx])   && is_array($post['ampc_zone'][$rowIdx]))   ? $post['ampc_zone'][$rowIdx]   : array();
+
+        // Check flat keys for FOX
+        if (!isset($method['FOX']) || $method['FOX'] === '') {
+            if (isset($post['ampc_fox_method'][$rowIdx]) && trim((string)$post['ampc_fox_method'][$rowIdx]) !== '') {
+                $method['FOX'] = trim((string)$post['ampc_fox_method'][$rowIdx]);
+            } elseif (isset($post['ampc_fox_method']) && is_string($post['ampc_fox_method']) && trim($post['ampc_fox_method']) !== '') {
+                $method['FOX'] = trim($post['ampc_fox_method']);
+            }
+        }
+        if (!isset($zone['FOX']) || $zone['FOX'] === '') {
+            if (isset($post['ampc_fox_val'][$rowIdx]) && trim((string)$post['ampc_fox_val'][$rowIdx]) !== '') {
+                $zone['FOX'] = trim((string)$post['ampc_fox_val'][$rowIdx]);
+            } elseif (isset($post['ampc_fox_value'][$rowIdx]) && trim((string)$post['ampc_fox_value'][$rowIdx]) !== '') {
+                $zone['FOX'] = trim((string)$post['ampc_fox_value'][$rowIdx]);
+            } elseif (isset($post['ampc_fox_val']) && is_string($post['ampc_fox_val']) && trim($post['ampc_fox_val']) !== '') {
+                $zone['FOX'] = trim($post['ampc_fox_val']);
+            } elseif (isset($post['ampc_fox_value']) && is_string($post['ampc_fox_value']) && trim($post['ampc_fox_value']) !== '') {
+                $zone['FOX'] = trim($post['ampc_fox_value']);
+            }
+        }
+
+        // Check flat keys for FEP
+        if (!isset($method['FEP']) || $method['FEP'] === '') {
+            if (isset($post['ampc_fep_method'][$rowIdx]) && trim((string)$post['ampc_fep_method'][$rowIdx]) !== '') {
+                $method['FEP'] = trim((string)$post['ampc_fep_method'][$rowIdx]);
+            } elseif (isset($post['ampc_fep_method']) && is_string($post['ampc_fep_method']) && trim($post['ampc_fep_method']) !== '') {
+                $method['FEP'] = trim($post['ampc_fep_method']);
+            }
+        }
+        if (!isset($zone['FEP']) || $zone['FEP'] === '') {
+            if (isset($post['ampc_fep_val'][$rowIdx]) && trim((string)$post['ampc_fep_val'][$rowIdx]) !== '') {
+                $zone['FEP'] = trim((string)$post['ampc_fep_val'][$rowIdx]);
+            } elseif (isset($post['ampc_fep_value'][$rowIdx]) && trim((string)$post['ampc_fep_value'][$rowIdx]) !== '') {
+                $zone['FEP'] = trim((string)$post['ampc_fep_value'][$rowIdx]);
+            } elseif (isset($post['ampc_fep_val']) && is_string($post['ampc_fep_val']) && trim($post['ampc_fep_val']) !== '') {
+                $zone['FEP'] = trim($post['ampc_fep_val']);
+            } elseif (isset($post['ampc_fep_value']) && is_string($post['ampc_fep_value']) && trim($post['ampc_fep_value']) !== '') {
+                $zone['FEP'] = trim($post['ampc_fep_value']);
+            }
+        }
+
+        $agents = array();
+        foreach (bdsis_ampc_agents() as $code => $_ag) {
+            $m = isset($method[$code]) ? trim((string)$method[$code]) : '';
+            $z = isset($zone[$code])   ? trim((string)$zone[$code])   : '';
+            $r = ($z === '') ? '' : bdsis_ampc_interpret_agent($code, $z, $m);
+            if ($r === '') {
+                if ($code === 'FOX') {
+                    $r = trim((string)($post['ampc_fox_int'][$rowIdx] ?? $post['ampc_fox_int'] ?? ''));
+                } elseif ($code === 'FEP') {
+                    $r = trim((string)($post['ampc_fep_int'][$rowIdx] ?? $post['ampc_fep_int'] ?? ''));
+                }
+            }
+            if ($m !== '' || $z !== '' || $r !== '') {
+                $agents[$code] = array('method' => $m, 'zone' => $z, 'result' => $r);
+            }
+        }
+        if (count($agents) === 0) { return null; }
+
+        if (!is_array($triggeredBy) || count($triggeredBy) === 0) {
+            $triggeredBy = array('Manual');
+        }
+
+        $overall = bdsis_ampc_overall($agents);
+        if ($overall === '') {
+            $overall = trim((string)($post['ampc_phenotype_result'][$rowIdx] ?? $post['ampc_phenotype_result'] ?? $post['ampc_result'][$rowIdx] ?? ''));
+        }
+
+        return array(
+            'triggered_by' => array_values($triggeredBy),
+            'result'       => $overall,
+            'agents'       => $agents,
+        );
+    }
+}
+
+if (!function_exists('bdsis_ampc_delete')) {
+    /** Clears a single isolate's stored AmpC results. Safe when the migration hasn't run. */
+    function bdsis_ampc_delete($bdsis, $id, $owner = 'bact')
+    {
+        $id = (int)$id;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+        $tbl = ($owner === 'ecoli') ? 'ecoli_resistance_table' : 'bacteriology_resistance_table';
+        $keyCol = ($owner === 'ecoli') ? 'prt3_record_id' : 'brt2_id';
+
+        if (bdsis_ampc_table_exists($bdsis)) {
+            /* Scoped by owner: brt2_id carries two unrelated id spaces (see
+               bdsis_ampc_owner_column_ensure), so an unscoped DELETE on an
+               E. coli save wipes the bacteriology isolate of the same id. On
+               a database where the column is not there yet, fall back to the
+               unscoped statement -- that database has no E. coli AmpC rows to
+               confuse it with, because this path is what writes them. */
+            $own = bdsis_ampc_owner_key($owner);
+            $q = bdsis_ampc_owner_column_ensure($bdsis)
+                ? @$bdsis->prepare("DELETE FROM bacteriology_ampc_table WHERE brt2_id=? AND owner=?")
+                : @$bdsis->prepare("DELETE FROM bacteriology_ampc_table WHERE brt2_id=?");
+            if ($q) {
+                if (bdsis_ampc_owner_column_ensure($bdsis)) { $q->bind_param("is", $id, $own); }
+                else                                        { $q->bind_param("i", $id); }
+                $q->execute();
+                $q->close();
+            }
+        }
+        $u = @$bdsis->prepare("UPDATE `$tbl`
+                                  SET ampc_triggered=0, ampc_trigger_agents=NULL, ampc_result=NULL,
+                                      ampc_fox_method=NULL, ampc_fox_val=NULL, ampc_fox_value=NULL, ampc_fox_int=NULL,
+                                      ampc_fep_method=NULL, ampc_fep_val=NULL, ampc_fep_value=NULL, ampc_fep_int=NULL,
+                                      ampc_phenotype_result=NULL
+                                WHERE `$keyCol`=?");
+        if ($u) { $u->bind_param("i", $id); $u->execute(); $u->close(); }
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_ampc_save')) {
+    /**
+     * Persist one isolate's AmpC plan (replace semantics).
+     * Supports both general bacteriology isolates ($owner='bact') and E. coli ($owner='ecoli').
+     *
+     * @return bool
+     */
+    function bdsis_ampc_save($bdsis, $id, $plan, $user, $today, $owner = 'bact')
+    {
+        if (!($bdsis instanceof mysqli)) { return false; }
+        if (function_exists('bdsis_ampc_zone_varchar_ensure')) {
+            bdsis_ampc_zone_varchar_ensure($bdsis);
+        }
+        if (!bdsis_ampc_delete($bdsis, $id, $owner)) { return false; }
+        if (!is_array($plan) || !isset($plan['agents']) || count($plan['agents']) === 0) { return true; }
+
+        $id     = (int)$id;
+        $trigBy = implode(',', (array)$plan['triggered_by']);
+        $res    = (string)$plan['result'];
+        $user   = (string)$user;
+        $today  = (string)$today;
+
+        $foxM = isset($plan['agents']['FOX']['method']) ? (string)$plan['agents']['FOX']['method'] : null;
+        $foxV = isset($plan['agents']['FOX']['zone']) && $plan['agents']['FOX']['zone'] !== '' ? (string)$plan['agents']['FOX']['zone'] : null;
+        $foxI = isset($plan['agents']['FOX']['result']) ? (string)$plan['agents']['FOX']['result'] : null;
+
+        $fepM = isset($plan['agents']['FEP']['method']) ? (string)$plan['agents']['FEP']['method'] : null;
+        $fepV = isset($plan['agents']['FEP']['zone']) && $plan['agents']['FEP']['zone'] !== '' ? (string)$plan['agents']['FEP']['zone'] : null;
+        $fepI = isset($plan['agents']['FEP']['result']) ? (string)$plan['agents']['FEP']['result'] : null;
+
+        $tbl    = ($owner === 'ecoli') ? 'ecoli_resistance_table' : 'bacteriology_resistance_table';
+        $keyCol = ($owner === 'ecoli') ? 'prt3_record_id' : 'brt2_id';
+
+        /* Upsert the overall resistance row */
+        $has = @$bdsis->query("SELECT 1 FROM `$tbl` WHERE `$keyCol`=".$id);
+        if ($has && $has->num_rows > 0) {
+            $has->free();
+            $sql = "UPDATE `$tbl`
+                       SET ampc_triggered=1,
+                           ampc_trigger_agents=?,
+                           ampc_result=?,
+                           ampc_fox_method=?,
+                           ampc_fox_val=?,
+                           ampc_fox_value=?,
+                           ampc_fox_int=?,
+                           ampc_fep_method=?,
+                           ampc_fep_val=?,
+                           ampc_fep_value=?,
+                           ampc_fep_int=?,
+                           ampc_phenotype_result=?,
+                           recorded_by=?,
+                           recorded_on=?
+                     WHERE `$keyCol`=?";
+            $u = @$bdsis->prepare($sql);
+            if ($u) {
+                $u->bind_param("sssssssssssssi", $trigBy, $res, $foxM, $foxV, $foxV, $foxI, $fepM, $fepV, $fepV, $fepI, $res, $user, $today, $id);
+                $u->execute();
+                $u->close();
+            }
+        } else {
+            if ($has) { $has->free(); }
+            $sql = "INSERT INTO `$tbl`
+                    (`$keyCol`, esbl_triggered, cpe_triggered,
+                     ampc_triggered, ampc_trigger_agents, ampc_result,
+                     ampc_fox_method, ampc_fox_val, ampc_fox_value, ampc_fox_int,
+                     ampc_fep_method, ampc_fep_val, ampc_fep_value, ampc_fep_int,
+                     ampc_phenotype_result, recorded_by, recorded_on)
+                    VALUES (?, 0, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            $i = @$bdsis->prepare($sql);
+            if ($i) {
+                $i->bind_param("isssssssssssss", $id, $trigBy, $res, $foxM, $foxV, $foxV, $foxI, $fepM, $fepV, $fepV, $fepI, $res, $user, $today);
+                $i->execute();
+                $i->close();
+            }
+        }
+
+        /* Per-agent rows in bacteriology_ampc_table, tagged with the id space
+           they belong to so a pathotype record and a bacteriology isolate that
+           happen to share a number stay apart. */
+        if (bdsis_ampc_table_exists($bdsis)) {
+            $hasOwner = bdsis_ampc_owner_column_ensure($bdsis);
+            $own = bdsis_ampc_owner_key($owner);
+            $d = $hasOwner
+                ? @$bdsis->prepare("INSERT INTO bacteriology_ampc_table
+                                    (brt2_id, owner, agent_code, ampc_method, zone_diameter, agent_result)
+                                    VALUES (?, ?, ?, ?, ?, ?)")
+                : @$bdsis->prepare("INSERT INTO bacteriology_ampc_table
+                                    (brt2_id, agent_code, ampc_method, zone_diameter, agent_result)
+                                    VALUES (?, ?, ?, ?, ?)");
+            if ($d) {
+                foreach ($plan['agents'] as $code => $row) {
+                    $c  = strtoupper((string)$code);
+                    $m  = (string)$row['method'];
+                    $z  = ($row['zone'] === '' || $row['zone'] === null) ? null : (string)$row['zone'];
+                    $ar = (string)$row['result'];
+                    if ($hasOwner) { $d->bind_param("isssss", $id, $own, $c, $m, $z, $ar); }
+                    else           { $d->bind_param("issss",  $id, $c, $m, $z, $ar); }
+                    $d->execute();
+                }
+                $d->close();
+            }
+        }
+
+        /* Update rcdc_bacteriology_result_table if exists. Bacteriology only:
+           its record_id is a bacteriology id, so writing a pathotype record id
+           into it would attach an E. coli panel's AmpC to an unrelated
+           bacteriology row. The E. coli panel's values live in full on
+           ecoli_resistance_table and bacteriology_ampc_table (owner='ecoli'). */
+        $chkRcdc = (bdsis_ampc_owner_key($owner) === 'ecoli')
+            ? null
+            : @$bdsis->query("SHOW TABLES LIKE 'rcdc_bacteriology_result_table'");
+        if ($chkRcdc && $chkRcdc->num_rows > 0) {
+            $chkRcdc->free();
+            $chkRow = @$bdsis->query("SELECT 1 FROM `rcdc_bacteriology_result_table` WHERE `record_id`=".$id);
+            if ($chkRow && $chkRow->num_rows > 0) {
+                $chkRow->free();
+                $uRcdc = @$bdsis->prepare("UPDATE `rcdc_bacteriology_result_table`
+                                              SET ampc_fox_method=?, ampc_fox_val=?, ampc_fox_value=?, ampc_fox_int=?,
+                                                  ampc_fep_method=?, ampc_fep_val=?, ampc_fep_value=?, ampc_fep_int=?,
+                                                  ampc_phenotype_result=?
+                                            WHERE `record_id`=?");
+                if ($uRcdc) {
+                    $uRcdc->bind_param("sssssssssi", $foxM, $foxV, $foxV, $foxI, $fepM, $fepV, $fepV, $fepI, $res, $id);
+                    $uRcdc->execute();
+                    $uRcdc->close();
+                }
+            } else {
+                if ($chkRow) { $chkRow->free(); }
+                $iRcdc = @$bdsis->prepare("INSERT INTO `rcdc_bacteriology_result_table`
+                                           (`record_id`, ampc_fox_method, ampc_fox_val, ampc_fox_value, ampc_fox_int,
+                                            ampc_fep_method, ampc_fep_val, ampc_fep_value, ampc_fep_int, ampc_phenotype_result)
+                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                if ($iRcdc) {
+                    $iRcdc->bind_param("isssssssss", $id, $foxM, $foxV, $foxV, $foxI, $fepM, $fepV, $fepV, $fepI, $res);
+                    $iRcdc->execute();
+                    $iRcdc->close();
+                }
+            }
+        }
+
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_ampc_load')) {
+    /**
+     * One isolate's stored AmpC results, or null when nothing stored.
+     * Supports both general bacteriology ($owner='bact') and E. coli ($owner='ecoli').
+     *
+     * @return array|null  array('triggered_by','result','agents',...)
+     */
+    function bdsis_ampc_load($bdsis, $id, $owner = 'bact')
+    {
+        $id = (int)$id;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return null; }
+
+        $tbl    = ($owner === 'ecoli') ? 'ecoli_resistance_table' : 'bacteriology_resistance_table';
+        $keyCol = ($owner === 'ecoli') ? 'prt3_record_id' : 'brt2_id';
+
+        $r = @$bdsis->query("SELECT * FROM `$tbl` WHERE `$keyCol`=".$id);
+        if (!$r || $r->num_rows === 0) { if ($r) { $r->free(); } return null; }
+        $row = $r->fetch_assoc(); $r->free();
+
+        $hasAmpc = ((int)($row['ampc_triggered'] ?? 0) === 1)
+                || !empty($row['ampc_result'])
+                || !empty($row['ampc_phenotype_result'])
+                || !empty($row['ampc_fox_val'])
+                || !empty($row['ampc_fep_val']);
+        if (!$hasAmpc) { return null; }
+
+        $agents = array();
+        if (bdsis_ampc_table_exists($bdsis)) {
+            /* Same owner scope the save writes under, so an E. coli panel does
+               not read back the agent rows of the bacteriology isolate that
+               shares its id. */
+            $ownerSql = bdsis_ampc_owner_column_ensure($bdsis)
+                ? " AND owner='".$bdsis->real_escape_string(bdsis_ampc_owner_key($owner))."'"
+                : '';
+            $a = @$bdsis->query("SELECT agent_code, ampc_method, zone_diameter, agent_result
+                                   FROM bacteriology_ampc_table WHERE brt2_id=".$id.$ownerSql);
+            if ($a) {
+                while (list($c, $m, $z, $ar) = $a->fetch_row()) {
+                    $agents[strtoupper((string)$c)] = array(
+                        'method' => (string)$m,
+                        'zone'   => ($z === null ? '' : (string)$z),
+                        'result' => (string)$ar,
+                    );
+                }
+                $a->free();
+            }
+        }
+
+        // Fallback or fill for FOX/FEP if missing from agents table
+        if (!isset($agents['FOX']) || $agents['FOX']['zone'] === '') {
+            $foxZ = $row['ampc_fox_val'] ?? $row['ampc_fox_value'] ?? '';
+            if ($foxZ !== '' || !empty($row['ampc_fox_method'])) {
+                $agents['FOX'] = array(
+                    'method' => (string)($row['ampc_fox_method'] ?? ''),
+                    'zone'   => (string)$foxZ,
+                    'result' => (string)($row['ampc_fox_int'] ?? ''),
+                );
+            }
+        }
+        if (!isset($agents['FEP']) || $agents['FEP']['zone'] === '') {
+            $fepZ = $row['ampc_fep_val'] ?? $row['ampc_fep_value'] ?? '';
+            if ($fepZ !== '' || !empty($row['ampc_fep_method'])) {
+                $agents['FEP'] = array(
+                    'method' => (string)($row['ampc_fep_method'] ?? ''),
+                    'zone'   => (string)$fepZ,
+                    'result' => (string)($row['ampc_fep_int'] ?? ''),
+                );
+            }
+        }
+
+        $resFinal = !empty($row['ampc_result']) ? (string)$row['ampc_result'] : (string)($row['ampc_phenotype_result'] ?? '');
+        return array(
+            'triggered_by'          => array_filter(explode(',', (string)($row['ampc_trigger_agents'] ?? ''))),
+            'result'                => $resFinal,
+            'agents'                => $agents,
+            'ampc_fox_method'       => (string)($row['ampc_fox_method'] ?? ''),
+            'ampc_fox_val'          => (string)($row['ampc_fox_val'] ?? $row['ampc_fox_value'] ?? ''),
+            'ampc_fox_value'        => (string)($row['ampc_fox_value'] ?? $row['ampc_fox_val'] ?? ''),
+            'ampc_fox_int'          => (string)($row['ampc_fox_int'] ?? ''),
+            'ampc_fep_method'       => (string)($row['ampc_fep_method'] ?? ''),
+            'ampc_fep_val'          => (string)($row['ampc_fep_val'] ?? $row['ampc_fep_value'] ?? ''),
+            'ampc_fep_value'        => (string)($row['ampc_fep_value'] ?? $row['ampc_fep_val'] ?? ''),
+            'ampc_fep_int'          => (string)($row['ampc_fep_int'] ?? ''),
+            'ampc_phenotype_result' => $resFinal,
+        );
+    }
+}

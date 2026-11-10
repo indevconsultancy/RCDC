@@ -1,0 +1,3 @@
+# The audit log itself is runtime data, not source. Only this file and the
+# access rule are tracked, so the directory exists on a fresh checkout.
+*.log

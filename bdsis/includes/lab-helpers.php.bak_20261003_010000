@@ -1,0 +1,1645 @@
+<?php
+/**
+ * Shared helpers for the Lab Results module.
+ *
+ * Included by lab/lab.php, lab/iu-lab.php, reports/report-view.php,
+ * reports/report-pdf.php and reports/report-export-excel.php.
+ */
+
+/* AmpC β-Lactamase Test (confirmatory phenotype). Self-contained helpers --
+   see includes/lab-ampc.php for the full module docstring. The panel is
+   rendered inside bdsis_bact_resistance_panels_html() below, saved by
+   lab/iu-lab.php right after bdsis_bact_save_resistance(), and loaded by
+   bdsis_bact_load_resistance() below. Safe to include before the migration
+   has run -- every DB call probes the table first. */
+require_once __DIR__ . '/lab-ampc.php';
+
+/* Bacteriology MIC — Phase 1 of the "MIC Document" protocol roll-out.
+   Adds a Method selector (Disk Diffusion / MIC) to each Enteric Pathogen
+   row's AST panel and a MIC entry panel sibling to the DD grid.
+   All helpers (breakpoints, interpret, panel HTML, parse, save, load) live
+   in this file. Reuses the E. coli MIC grammar via lab-mic.php and stores
+   results in bacteriology_ast_table with ast_method_id='02'. See file head
+   for Phase 1 vs Phase 2 scope boundaries. */
+require_once __DIR__ . '/lab-bact-mic.php';
+
+if (!function_exists('bdsis_processed_by_label')) {
+    /**
+     * Render a stored "processed by" value for display.
+     *
+     * "Processed by" used to be a dropdown of staff usernames backed by a
+     * foreign key, so historical rows hold a username. It is now a free-text
+     * field, so newer rows hold whatever the operator typed. Resolve the value
+     * against commondb.user_profile_table and fall back to the raw text when
+     * there is no matching user -- that keeps pre-existing records displaying
+     * the staff member's full name while supporting free text going forward.
+     *
+     * @param  string|null $value    stored processed_by value
+     * @param  mysqli|null $commondb connection to the commondb schema
+     * @return string                display label ('' when nothing is stored)
+     */
+    function bdsis_processed_by_label($value, $commondb)
+    {
+        if ($value === null || $value === '') {
+            return '';
+        }
+        if (!($commondb instanceof mysqli)) {
+            return $value;
+        }
+
+        $lookup = $commondb->query(
+            "SELECT fullname FROM user_profile_table WHERE username='"
+            . $commondb->real_escape_string($value) . "'"
+        );
+        if ($lookup && $lookup->num_rows > 0) {
+            list($fullname) = $lookup->fetch_row();
+            if ($fullname !== null && $fullname !== '') {
+                return $fullname;
+            }
+        }
+
+        return $value;
+    }
+}
+
+if (!function_exists('bdsis_restricted_proby_names')) {
+    /**
+     * The fixed "Processed by" list used by the E. coli PCR Result, E. coli AST
+     * Result and ELISA Result sections only.
+     *
+     * Kept as an ordinary function so the six names live in one place. Do NOT
+     * use this list for Microscopy, Bacteriology, Sample Shipment or any other
+     * section -- their Processed by controls are left as they are (Bacteriology
+     * per-pathogen row is free-text; Microscopy / Sample Shipment live in
+     * records/case.php and are outside the lab module altogether).
+     *
+     * The values are FULL NAMES, not usernames. bdsis_processed_by_label()
+     * resolves a stored name back through the free-text fallback path, so both
+     * legacy username values and these new full-name values render correctly
+     * on read. Save logic (iu-lab.php) is unchanged: it stores whatever was
+     * posted, without validating against this list, so historical rows that
+     * were saved with usernames continue to work.
+     *
+     * @return string[]
+     */
+    function bdsis_restricted_proby_names()
+    {
+        return array(
+            'Dorji Tshering',
+            'Sangay Dorji',
+            'Ugyen Chophel',
+            'Kinley Gyem',
+            'Jigme Lhendup',
+            'Kezang Wangchuk',
+        );
+    }
+}
+
+if (!function_exists('bdsis_restricted_proby_options_html')) {
+    /**
+     * Render the six-name <option> list for the restricted Processed by
+     * dropdown. Emitted INSIDE an existing <select> that already carries the
+     * "currently saved" placeholder <option value="$pby">$pbyname</option>, so
+     * the caller's markup and save-side behaviour are unchanged. Nothing is
+     * pre-selected here -- the placeholder above it holds the saved value, so
+     * on a new record no name is highlighted, and on an edit the saved value
+     * stays visible whether or not it is one of the six.
+     *
+     * @return string
+     */
+    function bdsis_restricted_proby_options_html()
+    {
+        $out = '';
+        foreach (bdsis_restricted_proby_names() as $n) {
+            $h = htmlspecialchars($n, ENT_QUOTES);
+            $out .= '<option value="' . $h . '">' . $h . '</option>';
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_pcr_strains')) {
+    /**
+     * The E.coli pathology types the PCR Result section offers.
+     *
+     * Sourced from ms_ecoli_strain_table instead of being hardcoded. '98' (Non
+     * DEC) and '99' (Not Required) are deliberately excluded -- the form only
+     * ever recorded the six DEC pathotypes.
+     *
+     * @param  mysqli $bdsis
+     * @return array  strain_id => ecoli_strain
+     */
+    function bdsis_ecoli_pcr_strains($bdsis)
+    {
+        $strains = array();
+        if (!($bdsis instanceof mysqli)) {
+            return $strains;
+        }
+        $qry = $bdsis->query(
+            "SELECT strain_id, ecoli_strain FROM ms_ecoli_strain_table
+              WHERE strain_id IN ('01','02','03','04','05','06') ORDER BY strain_id"
+        );
+        if ($qry) {
+            while (list($sid, $sname) = $qry->fetch_row()) {
+                $strains[$sid] = $sname;
+            }
+        }
+
+        return $strains;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_pcr_applies')) {
+    /**
+     * THE single rule deciding whether the E.coli PCR Result section applies to
+     * one isolate of one subject.
+     *
+     * It applies when either:
+     *   1. the isolate's Bacteriology AST Result is 'Positive'
+     *      (bacteriology_result_table2.ast_status), or
+     *   2. a PCR record already exists for that subject_id + ecoli_id
+     *      (rcdc_ecoli_pcr_result_table2).
+     *
+     * Clause 2 is NOT optional. Every E.coli bacteriology row written before the
+     * AST select started offering Positive/Negative carries ast_status='NR'
+     * (3725 such rows) while 3650+ PCR records hang off them. Gating purely on
+     * ast_status would make all of that captured PCR and pathology-type data
+     * invisible -- in the data-entry form AND in every report -- and
+     * un-editable. Clause 2 keeps historical records working while new entries
+     * follow clause 1.
+     *
+     * This helper is the ONLY place the rule lives. lab/lab.php (render),
+     * lab/iu-lab.php (save), reports/report-view.php and
+     * reports/report-html-builder.php (print) all call it, so the layers cannot
+     * drift apart again.
+     *
+     * Note on granularity: the rule is keyed by (subject_id, ecoli_id), not by
+     * bacteriology row, because rcdc_ecoli_pcr_result_table2 itself is keyed by
+     * (subject_id, ecoli_id) and carries no reference to a bacteriology row.
+     *
+     * @param  mysqli $bdsis
+     * @param  string $sid     subject_id
+     * @param  string $ecoliId pathogen_id, '025' (LF) or '026' (NLF)
+     * @return bool
+     */
+    function bdsis_ecoli_pcr_applies($bdsis, $sid, $ecoliId)
+    {
+        if (!($bdsis instanceof mysqli)) {
+            return false;
+        }
+        if ($sid === null || $sid === '' || $ecoliId === null || $ecoliId === '') {
+            return false;
+        }
+
+        $qry = $bdsis->prepare(
+            "SELECT
+                EXISTS(SELECT 1 FROM bacteriology_result_table2
+                        WHERE subject_id = ? AND pathogen_id = ? AND ast_status = 'Positive')
+              + EXISTS(SELECT 1 FROM rcdc_ecoli_pcr_result_table2
+                        WHERE subject_id = ? AND ecoli_id = ?)"
+        );
+        if (!$qry) {
+            return false;
+        }
+        $qry->bind_param("ssss", $sid, $ecoliId, $sid, $ecoliId);
+        $qry->execute();
+        $qry->bind_result($hits);
+        $applies = $qry->fetch() ? ((int) $hits > 0) : false;
+        $qry->close();
+
+        return $applies;
+    }
+}
+
+if (!function_exists('bdsis_save_ecoli_strains')) {
+    /**
+     * Persist one E.coli block's pathology-type results into
+     * rcdc_ecoli_pcr_result_table3.
+     *
+     * The form used to post six independent Positive/Negative dropdowns; it now
+     * posts a single multi-select of the pathology types found. The stored shape
+     * is unchanged: each of the six strains still gets its own row, holding
+     * 'Positive' when the user selected it and 'Negative' when they did not.
+     *
+     * Each strain is UPDATEd when a row for it already exists under this block
+     * and INSERTed when it does not, so a block that is missing a strain row
+     * (some historical records only stored five) gets the missing one written
+     * rather than silently skipped.
+     *
+     * Existence is decided against (prt2_record_id, ecoli_strain_id) -- the
+     * table's own primary key -- rather than against the record_id the form
+     * posts back. The form is now an unbounded list of blocks, and a stale or
+     * crafted rsltid[i][x] pointing at another block's row would otherwise let
+     * one block overwrite another's stored result. The key cannot lie.
+     *
+     * This is the one and only implementation of the strain-persistence logic;
+     * the save handler calls it once per posted block.
+     *
+     * @param  mysqli $bdsis
+     * @param  int    $prt2RecordId rcdc_ecoli_pcr_result_table2.record_id
+     * @param  array  $selected     strain_ids the user marked Positive
+     * @param  array  $strainIds    the strain_ids this block covers
+     * @return void
+     */
+    function bdsis_save_ecoli_strains($bdsis, $prt2RecordId, $selected, $strainIds)
+    {
+        $prt2RecordId = (int) $prt2RecordId;
+        if ($prt2RecordId <= 0) {
+            return;
+        }
+        $selected = array_map('strval', (array) $selected);
+
+        $selqry = $bdsis->prepare("SELECT record_id FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id=? AND ecoli_strain_id=?");
+        $updqry = $bdsis->prepare("UPDATE rcdc_ecoli_pcr_result_table3 SET strain_result=? WHERE prt2_record_id=? AND ecoli_strain_id=?");
+        $insqry = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_result_table3(prt2_record_id, ecoli_strain_id, strain_result) VALUES(?, ?, ?)");
+
+        foreach ((array) $strainIds as $strainId) {
+            $strainId = (string) $strainId;
+            if ($strainId === '') {
+                continue;
+            }
+            $result = in_array($strainId, $selected, true) ? 'Positive' : 'Negative';
+
+            $selqry->bind_param("is", $prt2RecordId, $strainId);
+            $selqry->execute();
+            $selqry->store_result();
+            $exists = $selqry->num_rows > 0;
+            $selqry->free_result();
+
+            if ($exists) {
+                $updqry->bind_param("sis", $result, $prt2RecordId, $strainId);
+                $updqry->execute();
+            } else {
+                $insqry->bind_param("iss", $prt2RecordId, $strainId, $result);
+                $insqry->execute();
+            }
+        }
+    }
+}
+
+if (!function_exists('bdsis_subject_has_ecoli')) {
+    /**
+     * Does this subject have E.coli recorded in the Bacteriology Result section?
+     *
+     * E.coli is two master rows in ms_enteric_bacterial_pathogen_table:
+     * '025' (LF E.coli) and '026' (NLF E.coli). Either one counts.
+     *
+     * This is one half of the gate on the Rotavirus genotype field -- the other
+     * half is the ELISA Rotavirus result being 'Positive'. It is evaluated
+     * against the database on both the render path (lab/lab.php, for the
+     * server-side initial visibility) and the save path (lab/iu-lab.php), so a
+     * posted flag is never trusted.
+     *
+     * @param  mysqli $bdsis
+     * @param  string $sid   subject_id
+     * @return bool
+     */
+    function bdsis_subject_has_ecoli($bdsis, $sid)
+    {
+        if (!($bdsis instanceof mysqli) || $sid === null || $sid === '') {
+            return false;
+        }
+
+        $qry = $bdsis->prepare(
+            "SELECT 1 FROM bacteriology_result_table2
+              WHERE subject_id = ? AND pathogen_id IN ('025','026') LIMIT 1"
+        );
+        if (!$qry) {
+            return false;
+        }
+        $qry->bind_param("s", $sid);
+        $qry->execute();
+        $qry->store_result();
+        $found = $qry->num_rows > 0;
+        $qry->close();
+
+        return $found;
+    }
+}
+
+if (!function_exists('bdsis_active_rotavirus_genotypes')) {
+    /**
+     * Active rows of ms_rotavirus_genotype_table as genotype_id => genotype.
+     *
+     * Used to populate the Genotype dropdown and, on the save path, as the
+     * whitelist a posted genotype_id must appear in before it is stored.
+     *
+     * @param  mysqli $bdsis
+     * @return array
+     */
+    function bdsis_active_rotavirus_genotypes($bdsis)
+    {
+        $genotypes = array();
+        if (!($bdsis instanceof mysqli)) {
+            return $genotypes;
+        }
+
+        $qry = $bdsis->query(
+            "SELECT genotype_id, genotype FROM ms_rotavirus_genotype_table
+              WHERE status = 1 ORDER BY genotype_id ASC"
+        );
+        if ($qry) {
+            while (list($gid, $gname) = $qry->fetch_row()) {
+                $genotypes[$gid] = $gname;
+            }
+        }
+
+        return $genotypes;
+    }
+}
+
+if (!function_exists('bdsis_rotavirus_gp_groups')) {
+    /**
+     * BDSIS New Field Request - Rotavirus Genotyping.
+     *
+     * The active genotypes split into the two families the request asks for:
+     *   G type  G1 G2 G3 G4 G8 G9 G10 G12
+     *   P type  P[4] P[6] P[8] P[9] P[10] P[11]
+     * Split on the label, so the master table stays the single source of the
+     * values and nothing here has to be kept in step with it by hand. Combined
+     * labels such as "G1P[8]" are inactive rows and never reach this list.
+     *
+     * @param  mysqli $bdsis
+     * @return array array('G' => id => label, 'P' => id => label)
+     */
+    function bdsis_rotavirus_gp_groups($bdsis)
+    {
+        /* genotype_group says which picker a row belongs to when the label
+           cannot: "UT" starts with neither G nor P, and UT in the G column is a
+           different observation from UT in the P column, so each has its own row
+           and its own id. Rows without a group (every pre-existing one) keep
+           being classified by their label exactly as before.
+           See sql/2026-09-18_rotavirus_ut_genotype.sql. */
+        $groups = array();
+        $res = ($bdsis instanceof mysqli)
+            ? @$bdsis->query("SELECT genotype_id, genotype_group FROM ms_rotavirus_genotype_table")
+            : false;
+        if ($res) {
+            while (list($gid, $grp) = $res->fetch_row()) {
+                $grp = strtoupper(trim((string) $grp));
+                if ($grp === 'G' || $grp === 'P') { $groups[(string) $gid] = $grp; }
+            }
+            $res->free();
+        }
+
+        $out = array('G' => array(), 'P' => array());
+        foreach (bdsis_active_rotavirus_genotypes($bdsis) as $gid => $label) {
+            $trimmed = trim((string) $label);
+            if ($trimmed === '') { continue; }
+            if (isset($groups[(string) $gid])) {
+                $out[$groups[(string) $gid]][$gid] = $trimmed;
+                continue;
+            }
+            $first = strtoupper(substr($trimmed, 0, 1));
+            if ($first === 'G' && strpos($trimmed, 'P[') === false) {
+                $out['G'][$gid] = $trimmed;
+            } elseif ($first === 'P') {
+                $out['P'][$gid] = $trimmed;
+            }
+        }
+
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_rotavirus_gp_compose')) {
+    /**
+     * The genotype string a set of G/P selections reads as.
+     *
+     * G labels come first, then P labels, each in master order, run together:
+     *
+     *   G1 + P[8]            -> G1P[8]
+     *   G2 + P[4]            -> G2P[4]
+     *   G4 + P[4] + P[8]     -> G4P[4]P[8]
+     *   G8 + UT              -> G8 UT
+     *
+     * UT is a word rather than a type, so it is separated by a space from
+     * whatever sits next to it; everything else is concatenated.
+     *
+     * @param  array $labels selected labels, G group first then P group
+     * @return string        '' when nothing is selected
+     */
+    function bdsis_rotavirus_gp_compose($labels)
+    {
+        $out = '';
+        foreach ((array) $labels as $label) {
+            $label = trim((string) $label);
+            if ($label === '') { continue; }
+            if ($out === '') { $out = $label; continue; }
+            $spaced = (strtoupper($label) === 'UT') || (strtoupper(substr($out, -2)) === 'UT');
+            $out .= ($spaced ? ' ' : '') . $label;
+        }
+
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_rotavirus_gp_selected')) {
+    /**
+     * BDSIS New Field Request - Rotavirus Genotyping.
+     *
+     * The G/P genotype ids already stored for a subject.
+     *
+     * @param  mysqli $bdsis
+     * @param  string $sid
+     * @return array  genotype_id => true
+     */
+    function bdsis_rotavirus_gp_selected($bdsis, $sid)
+    {
+        $out = array();
+        if (!($bdsis instanceof mysqli) || trim((string) $sid) === '') { return $out; }
+        $res = @$bdsis->query(
+            "SELECT genotype_id FROM rcdc_elisa_genotype_table
+              WHERE subject_id = '" . $bdsis->real_escape_string($sid) . "'"
+        );
+        if ($res) {
+            while (list($gid) = $res->fetch_row()) { $out[(string) $gid] = true; }
+            $res->free();
+        }
+
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_rotavirus_gp_save')) {
+    /**
+     * BDSIS New Field Request - Rotavirus Genotyping.
+     *
+     * Replace a subject's stored G/P genotypes. Callers pass the posted ids;
+     * anything not an ACTIVE genotype is dropped, so an unknown or injected
+     * value can never be stored. Passing an empty list simply clears them,
+     * which is what happens when the two gating conditions stop holding.
+     *
+     * @param  array $ids posted genotype ids
+     * @return bool  false only when the table is missing
+     */
+    function bdsis_rotavirus_gp_save($bdsis, $sid, $ids, $user, $today)
+    {
+        if (!($bdsis instanceof mysqli) || trim((string) $sid) === '') { return false; }
+        $del = $bdsis->prepare("DELETE FROM rcdc_elisa_genotype_table WHERE subject_id=?");
+        if (!$del) { return false; }
+        $del->bind_param("s", $sid);
+        $del->execute();
+        $del->close();
+
+        $allowed = bdsis_active_rotavirus_genotypes($bdsis);
+        $clean   = array();
+        foreach ((array) $ids as $gid) {
+            $gid = trim((string) $gid);
+            if ($gid !== '' && array_key_exists($gid, $allowed)) { $clean[$gid] = true; }
+        }
+        if (count($clean) === 0) { return true; }
+
+        $ins = $bdsis->prepare(
+            "INSERT INTO rcdc_elisa_genotype_table (subject_id, genotype_id, recorded_by, recorded_on)
+             VALUES (?,?,?,?)"
+        );
+        if (!$ins) { return false; }
+        foreach (array_keys($clean) as $gid) {
+            $ins->bind_param("ssss", $sid, $gid, $user, $today);
+            $ins->execute();
+        }
+        $ins->close();
+
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_rotavirus_genotype_label')) {
+    /**
+     * Resolve a stored genotype_id to its display name.
+     *
+     * Returns '' when nothing is stored or the id is unknown, so callers can
+     * test the result and skip rendering entirely -- the vast majority of ELISA
+     * rows carry no genotype and must not gain an empty label.
+     *
+     * Retired genotypes (status = 0) still resolve here: a value that was valid
+     * when it was captured must keep displaying on historical reports even
+     * after it is removed from the dropdown.
+     *
+     * @param  mysqli      $bdsis
+     * @param  string|null $genotypeId
+     * @return string
+     */
+    function bdsis_rotavirus_genotype_label($bdsis, $genotypeId)
+    {
+        if ($genotypeId === null || $genotypeId === '' || !($bdsis instanceof mysqli)) {
+            return '';
+        }
+
+        $qry = $bdsis->prepare(
+            "SELECT genotype FROM ms_rotavirus_genotype_table WHERE genotype_id = ?"
+        );
+        if (!$qry) {
+            return '';
+        }
+        $qry->bind_param("s", $genotypeId);
+        $qry->execute();
+        $qry->bind_result($genotype);
+        $label = $qry->fetch() ? (string) $genotype : '';
+        $qry->close();
+
+        return $label;
+    }
+}
+
+if (!function_exists('bdsis_normalize_date')) {
+    /**
+     * Normalise a posted date to the YYYY-MM-DD that MySQL DATE columns expect.
+     *
+     * Every date field in the app is now a native <input type="date">, which
+     * always submits YYYY-MM-DD, so in normal use this is a pass-through. It
+     * exists because the previous jQuery UI picker submitted dd-mm-yyyy and the
+     * save handlers interpolated that straight into DATE columns -- MySQL cannot
+     * parse it and silently stored 0000-00-00. Twenty-four values across the
+     * subject, clinical, sample and bacteriology tables were lost that way,
+     * including the hospital visit date on the four most recent cases.
+     *
+     * Returns null for an empty or unparseable value so callers store a real
+     * NULL rather than the zero date, which sorts and filters as a valid day.
+     *
+     * @param  string|null $value
+     * @return string|null YYYY-MM-DD, or null
+     */
+    function bdsis_normalize_date($value)
+    {
+        if ($value === null) { return null; }
+        $value = trim((string) $value);
+        if ($value === '' || $value === '0000-00-00') { return null; }
+
+        // Already the storage format.
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $m)) {
+            return checkdate((int) $m[2], (int) $m[3], (int) $m[1]) ? $value : null;
+        }
+
+        // Legacy picker output and common hand-typed forms: d-m-Y and d/m/Y.
+        // Day-first, not month-first: the old picker was configured dd-mm-yy and
+        // the users are in Bhutan, so 03-04-2026 means 3 April.
+        if (preg_match('/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/', $value, $m)) {
+            $d = (int) $m[1]; $mo = (int) $m[2]; $y = (int) $m[3];
+            return checkdate($mo, $d, $y) ? sprintf('%04d-%02d-%02d', $y, $mo, $d) : null;
+        }
+
+        $ts = strtotime($value);
+        return $ts === false ? null : date('Y-m-d', $ts);
+    }
+}
+
+/* ===========================================================================
+   Conditional ESBL / Carbapenemase (mCIM, eCIM) testing -- Bacteriology AST.
+   ---------------------------------------------------------------------------
+   The routine disk-diffusion panel decides whether a confirmatory test is
+   required for an isolate:
+     ESBL test        any of CAZ / CTX / CPD / CRO Resistant
+     mCIM             any of IMI / EPT / MER Resistant or Intermediate
+   The triggers are re-derived server side from the posted zones on every save
+   (lab/iu-lab.php), using the very breakpoints the AST loop applies, and the
+   FINAL interpretations are stored (bacteriology_resistance_table) so reports
+   print what was signed off rather than recomputing it.
+   Tables: sql/2026-09-08_esbl_carbapenemase.sql.
+   =========================================================================== */
+
+if (!function_exists('bdsis_bact_trigger_codes')) {
+    /**
+     * Routine-panel agents (ms_ast_table.code, method 01) that trigger a test.
+     *
+     * @return array 'esbl' => codes, 'cpe' => codes
+     */
+    function bdsis_bact_trigger_codes()
+    {
+        return array(
+            'esbl' => array('CAZ', 'CTX', 'CPD', 'CRO'),   // ceftazidime, cefotaxime, cefpodoxime, ceftriaxone
+            'cpe'  => array('IMI', 'EPT', 'MER'),          // imipenem, ertapenem, meropenem
+        );
+    }
+}
+
+if (!function_exists('bdsis_esbl_methods')) {
+    /** @return array */
+    function bdsis_esbl_methods() { return array('Combination Disk Test', 'ESBL E-test', 'Other'); }
+}
+if (!function_exists('bdsis_carbapenemase_methods')) {
+    /**
+     * Method list for the Carbapenems Test, exactly as the requirement document
+     * lists it. One list serves both the mCIM and the eCIM row.
+     *
+     * @return array
+     */
+    function bdsis_carbapenemase_methods() { return array('mCIM', 'eCIM', 'Carba NP', 'PCR', 'Other'); }
+}
+if (!function_exists('bdsis_mcim_methods')) {
+    /** @return array */
+    function bdsis_mcim_methods() { return bdsis_carbapenemase_methods(); }
+}
+if (!function_exists('bdsis_ecim_methods')) {
+    /** @return array */
+    function bdsis_ecim_methods() { return bdsis_carbapenemase_methods(); }
+}
+if (!function_exists('bdsis_esbl_interpretations')) {
+    /** The two confirmatory outcomes offered for the ESBL test. @return array */
+    function bdsis_esbl_interpretations() { return array('ESBL producer', 'Non-ESBL producer'); }
+}
+if (!function_exists('bdsis_carbapenemase_result')) {
+    // START ESBL / CARBAPENEMASE CHANGE
+    /**
+     * Final Carbapenemase Result, generated from the mCIM / eCIM readings:
+     *   mCIM Positive + eCIM read -> the eCIM outcome itself
+     *                                ("Metallo-β-lactamase (MBL) detected" or
+     *                                 "Serine carbapenemase detected")
+     *   mCIM Positive, no eCIM    -> Carbapenemase Positive (not storable: the
+     *                                save requires the eCIM first)
+     *   mCIM Negative             -> Carbapenemase Negative (eCIM not required)
+     *   mCIM Indeterminate        -> Carbapenemase Indeterminate
+     *   anything else             -> '' (never classified)
+     * The requirement defines Positive and Negative only; Indeterminate is
+     * carried through rather than being forced into either, because an
+     * indeterminate mCIM does not proceed to eCIM and must not read as a result
+     * it is not.
+     *
+     * @param  string      $mcimResult
+     * @param  string|null $ecimResult bdsis_ecim_interpret() output
+     * @return string
+     */
+    function bdsis_carbapenemase_result($mcimResult, $ecimResult = null)
+    {
+        if ($mcimResult === 'Positive') {
+            return ($ecimResult !== null && $ecimResult !== '') ? (string)$ecimResult : 'Carbapenemase Positive';
+        }
+        if ($mcimResult === 'Negative')      { return 'Carbapenemase Negative'; }
+        if ($mcimResult === 'Indeterminate') { return 'Carbapenemase Indeterminate'; }
+        return '';
+    }
+    // END ESBL / CARBAPENEMASE CHANGE
+}
+
+// START ESBL / CARBAPENEMASE CHANGE
+if (!function_exists('bdsis_cpe_interpretations')) {
+    /**
+     * Interpretation offered for a Carbapenems Test read by a method that has no
+     * decision rule in the requirement (Carba NP, PCR, Other). mCIM results are
+     * never chosen -- they are generated.
+     *
+     * @return array
+     */
+    function bdsis_cpe_interpretations() { return array('Carbapenemase Positive', 'Carbapenemase Negative'); }
+}
+
+if (!function_exists('bdsis_cim_zone_valid')) {
+    /**
+     * An mCIM / eCIM zone the decision rules can classify: a whole number of
+     * millimetres, 6 or more. 6 mm is the disc itself, so nothing smaller can be
+     * read; and the rules are written in whole mm (6-15, 16-18, >= 19), so a
+     * 15.5 would fall between two bands. The routine AST zone input is whole-mm
+     * too (type=number with the default step of 1).
+     *
+     * @param  mixed $zone
+     * @return bool
+     */
+    function bdsis_cim_zone_valid($zone)
+    {
+        $z = trim((string)$zone);
+        if ($z === '' || !is_numeric($z)) { return false; }
+        $f = (float)$z;
+        return $f >= 6 && floor($f) == $f;
+    }
+}
+// END ESBL / CARBAPENEMASE CHANGE
+
+if (!function_exists('bdsis_esbl_agents')) {
+    /**
+     * ESBL confirmatory agents from ms_esbl_agent_table (active, in order).
+     * Falls back to the four standard discs when the table is not installed,
+     * so the form still renders.
+     *
+     * @param  mysqli $bdsis
+     * @return array code => array('code','label','agent','content','pair','rule')
+     */
+    function bdsis_esbl_agents($bdsis)
+    {
+        static $cache = null;
+        if ($cache !== null) { return $cache; }
+        $cache = array();
+        $res = ($bdsis instanceof mysqli)
+            ? @$bdsis->query("SELECT code, short_label, antimicrobial_agent, content, pair_code, rule_mm
+                                FROM ms_esbl_agent_table WHERE status='1' ORDER BY sort_order ASC, code ASC")
+            : false;
+        if ($res) {
+            while (list($code, $label, $agent, $content, $pair, $rule) = $res->fetch_row()) {
+                $cache[(string)$code] = array(
+                    'code' => (string)$code, 'label' => (string)$label, 'agent' => (string)$agent,
+                    'content' => (string)$content, 'pair' => ($pair === null ? '' : (string)$pair),
+                    'rule' => ($rule === null ? null : (float)$rule),
+                );
+            }
+            $res->free();
+        }
+        if (count($cache) === 0) {
+            $cache = array(
+                'CTX'   => array('code'=>'CTX',   'label'=>'CTX',    'agent'=>'Cefotaxime',                  'content'=>'30 &#181;g',    'pair'=>'',    'rule'=>null),
+                // Names follow ms_ast_table (see sql/2026-09-17_esbl_carbapenemase_gap_fixes.sql).
+                'CTXCV' => array('code'=>'CTXCV', 'label'=>'CTX/CV', 'agent'=>'Cefotaxime-clavulanate',  'content'=>'30/10 &#181;g', 'pair'=>'CTX', 'rule'=>5.0),
+                'CAZ'   => array('code'=>'CAZ',   'label'=>'CAZ',    'agent'=>'Ceftazidime',             'content'=>'30 &#181;g',    'pair'=>'',    'rule'=>null),
+                'CAZCV' => array('code'=>'CAZCV', 'label'=>'CAZ/CV', 'agent'=>'Ceftazidime-clavulanate', 'content'=>'30/10 &#181;g', 'pair'=>'CAZ', 'rule'=>5.0),
+            );
+        }
+        return $cache;
+    }
+}
+
+if (!function_exists('bdsis_ast_breakpoints')) {
+    /**
+     * Disk-diffusion breakpoints, code => array(sus, int1, int2, res), for the
+     * routine panel (method 01). Same rows the save loop reads per agent.
+     *
+     * @param  mysqli $bdsis
+     * @return array
+     */
+    function bdsis_ast_breakpoints($bdsis)
+    {
+        $out = array();
+        $res = ($bdsis instanceof mysqli)
+            ? $bdsis->query("SELECT code, susceptible, intermediate1, intermediate2, resistance FROM ms_ast_table WHERE ast_method_id='01'")
+            : false;
+        if ($res) {
+            while (list($code, $sus, $int1, $int2, $r) = $res->fetch_row()) {
+                $out[strtoupper(trim((string)$code))] = array($sus, $int1, $int2, $r);
+            }
+            $res->free();
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_ast_interpret_zone')) {
+    /**
+     * The AST loop's interpretation, verbatim (same order, same comparisons):
+     *   zone <= resistance -> Resistant; int1..int2 -> Intermediate; >= sus -> Susceptible.
+     * '' and -99 (not tested) give ''.
+     *
+     * @param  string $zone posted zone
+     * @param  array  $bp   array(sus, int1, int2, res)
+     * @return string
+     */
+    function bdsis_ast_interpret_zone($zone, $bp)
+    {
+        $zone = trim((string)$zone);
+        if ($zone === '' || $zone === '-99' || !is_numeric($zone)) { return ''; }
+        list($sus, $int1, $int2, $res) = $bp;
+        $rslt = '';
+        if ($zone <= $res) { $rslt = 'Resistant'; }
+        if ($zone >= $int1 && $zone <= $int2) { $rslt = 'Intermediate'; }
+        if ($zone >= $sus) { $rslt = 'Susceptible'; }
+        return $rslt;
+    }
+}
+
+if (!function_exists('bdsis_mcim_interpret')) {
+    /**
+     * mCIM (CLSI M100): zone 6-15 mm = Positive; 16-18 mm with pinpoint
+     * colonies within the zone = Positive, without = Indeterminate;
+     * >= 19 mm without colonies = Negative, with colonies = Indeterminate.
+     *
+     * @param  mixed  $zone      mm
+     * @param  string $colonies  'Yes' | 'No'
+     * @return string Positive | Negative | Indeterminate | '' (not classifiable)
+     */
+    function bdsis_mcim_interpret($zone, $colonies)
+    {
+        // START ESBL / CARBAPENEMASE CHANGE
+        /* Blank, non-numeric, fractional or sub-disc (< 6 mm) zones, and a
+           missing colonies answer, are not classified. This used to read any
+           zone <= 15 -- including 0 or a blank cast to 0 -- as Positive. */
+        if (!bdsis_cim_zone_valid($zone)) { return ''; }
+        $colAns = strtolower(trim((string)$colonies));
+        if ($colAns !== 'yes' && $colAns !== 'no') { return ''; }
+        $z   = (float)$zone;
+        $col = ($colAns === 'yes');
+        // END ESBL / CARBAPENEMASE CHANGE
+        if ($z <= 15) { return 'Positive'; }
+        if ($z <= 18) { return $col ? 'Positive' : 'Indeterminate'; }
+        return $col ? 'Indeterminate' : 'Negative';
+    }
+}
+
+if (!function_exists('bdsis_ecim_interpret')) {
+    /**
+     * eCIM read against mCIM: an eCIM zone >= 5 mm larger than the mCIM zone
+     * = metallo-beta-lactamase; otherwise a serine carbapenemase.
+     *
+     * difference = eCIM zone - mCIM zone. A negative difference (eCIM smaller
+     * than mCIM) is below 5 and so reads as serine, exactly as the rule is
+     * written; it is not rejected, because nothing in the requirement says so.
+     *
+     * @return string 'Metallo-β-lactamase (MBL) detected' | 'Serine carbapenemase detected' | ''
+     */
+    function bdsis_ecim_interpret($ecimZone, $mcimZone)
+    {
+        // START ESBL / CARBAPENEMASE CHANGE
+        if (!bdsis_cim_zone_valid($ecimZone) || !bdsis_cim_zone_valid($mcimZone)) { return ''; }
+        /* Wording as the requirement writes it (β). The tables are utf8 and the
+           connection utf8mb4, so the character is stored as-is. */
+        return (((float)$ecimZone - (float)$mcimZone) >= 5)
+            ? 'Metallo-β-lactamase (MBL) detected'
+            : 'Serine carbapenemase detected';
+        // END ESBL / CARBAPENEMASE CHANGE
+    }
+}
+
+if (!function_exists('bdsis_resistance_plan_core')) {
+    /**
+     * The ESBL / carbapenemase rules, independent of where the isolate lives.
+     *
+     * Bacteriology isolates and E. coli pathotype records record the same two
+     * confirmatory tests under the same CLSI rules; only the key they hang off
+     * and the names their form fields post under differ. Both therefore call
+     * this, so a rule can never be right in one panel and wrong in the other.
+     *
+     * \@param  mysqli   $bdsis
+     * \@param  array    $results code => interpretation already recorded for this
+     *                           isolate ('Resistant', 'Intermediate', ...)
+     * \@param  string   $label   panel name, used in the refusal messages
+     * \@param  callable $field   fn($name, $sub = null) => the posted value
+     * \@return array 'ok', 'error', 'esbl', 'cpe'
+     */
+    function bdsis_resistance_plan_core($bdsis, $results, $label, $field)
+    {
+        $plan = array('ok' => true, 'error' => '', 'esbl' => null, 'cpe' => null);
+        $fail = function ($msg) use (&$plan) { $plan['ok'] = false; $plan['error'] = $msg; return $plan; };
+        $results = is_array($results) ? $results : array();
+
+        $trig   = bdsis_bact_trigger_codes();
+        $esblBy = array();
+        foreach ($trig['esbl'] as $c) { if (isset($results[$c]) && $results[$c] === 'Resistant') { $esblBy[] = $c; } }
+        $cpeBy  = array();
+        foreach ($trig['cpe'] as $c)  { if (isset($results[$c]) && ($results[$c] === 'Resistant' || $results[$c] === 'Intermediate')) { $cpeBy[] = $c; } }
+
+        /* 2. ESBL. */
+        if (count($esblBy) > 0) {
+            $why     = $label . ': ESBL test is required because ' . implode(', ', $esblBy) . ' is Resistant -- ';
+            $agents  = bdsis_esbl_agents($bdsis);
+            $methods = bdsis_esbl_methods();
+            $entered = array();
+            foreach ($agents as $code => $ag) {
+                $m = $field('esbl_method', $code);
+                $z = $field('esbl_zone', $code);
+                if ($m === '' && $z === '') { continue; }
+                if ($z === '' || !is_numeric($z) || (float)$z < 0) { return $fail($why . 'enter a valid zone diameter for ' . $ag['label'] . '.'); }
+                if (!in_array($m, $methods, true)) { return $fail($why . 'choose the method for ' . $ag['label'] . '.'); }
+                $entered[$code] = array('method' => $m, 'zone' => (float)$z);
+            }
+            if (count($entered) === 0) { return $fail($why . 'enter at least one ESBL antibiotic zone.'); }
+
+            /* Combination disk rule: >= rule_mm increase with clavulanate over the
+               plain disc = ESBL producer. Applied whenever a pair is complete and
+               read by combination disk; it overrides a hand-picked interpretation
+               so what is stored can never contradict the discs. */
+            $result = $field('esbl_result');
+            $auto   = null;
+            foreach ($agents as $code => $ag) {
+                if ($ag['pair'] === '' || $ag['rule'] === null) { continue; }
+                if (!isset($entered[$code]) || !isset($entered[$ag['pair']])) { continue; }
+                // START ESBL / CARBAPENEMASE CHANGE
+                /* The rule compares two combination-disk readings, so BOTH discs of
+                   the pair must have been read that way -- not just the clavulanate
+                   one, which is all this used to check. */
+                if ($entered[$code]['method'] !== 'Combination Disk Test'
+                    || $entered[$ag['pair']]['method'] !== 'Combination Disk Test') { continue; }
+                // END ESBL / CARBAPENEMASE CHANGE
+                if (($entered[$code]['zone'] - $entered[$ag['pair']]['zone']) >= $ag['rule']) { $auto = 'ESBL producer'; break; }
+                if ($auto === null) { $auto = 'Non-ESBL producer'; }
+            }
+            if ($auto !== null) { $result = $auto; }
+            if (!in_array($result, bdsis_esbl_interpretations(), true)) { return $fail($why . 'select the interpretation (ESBL producer / Non-ESBL producer).'); }
+            $plan['esbl'] = array('triggered_by' => $esblBy, 'result' => $result, 'agents' => $entered);
+        }
+
+        // START ESBL / CARBAPENEMASE CHANGE
+        /* 3. Carbapenems Test.
+              method mCIM             -> mCIM decision rule; eCIM only on Positive;
+                                         final result generated.
+              method Carba NP/PCR/Other -> no decision rule exists for these in the
+                                         requirement, so the reader states
+                                         Positive / Negative; the zone is optional
+                                         (Carba NP and PCR do not produce one).
+              method eCIM             -> refused: eCIM is performed only after a
+                                         Positive mCIM, and has its own row.
+              Fields of a branch that does not apply are ignored, never stored. */
+        if (count($cpeBy) > 0) {
+            $why = $label . ': Carbapenems Test is required because ' . implode(', ', $cpeBy) . ' is Resistant/Intermediate -- ';
+            $ca  = strtoupper($field('cpe_agent'));
+            $mm  = $field('mcim_method');
+            $mz  = $field('mcim_zone');
+            $mc  = $field('mcim_colonies');
+            if (!in_array($ca, $trig['cpe'], true))                    { return $fail($why . 'choose the carbapenem antibiotic (' . implode(' / ', $trig['cpe']) . ').'); }
+            if (!in_array($mm, bdsis_mcim_methods(), true))            { return $fail($why . 'choose the method.'); }
+            if ($mm === 'eCIM')                                        { return $fail($why . 'eCIM is performed only after a Positive mCIM. Choose mCIM as the method and record the eCIM reading in the eCIM row.'); }
+
+            $cpe = array(
+                'triggered_by' => $cpeBy, 'agent' => $ca, 'mcim_method' => $mm,
+                'mcim_zone' => null, 'mcim_colonies' => null, 'mcim_result' => null,
+                'ecim_method' => null, 'ecim_zone' => null, 'ecim_result' => null, 'result' => '',
+            );
+
+            if ($mm === 'mCIM') {
+                if (!bdsis_cim_zone_valid($mz))                        { return $fail($why . 'enter the mCIM zone diameter in whole millimetres (6 mm or more).'); }
+                if (!in_array($mc, array('Yes', 'No'), true))           { return $fail($why . 'state whether colonies are present within the mCIM zone.'); }
+                $mr = bdsis_mcim_interpret($mz, $mc);
+                if ($mr === '')                                         { return $fail($why . 'the mCIM reading could not be interpreted.'); }
+                $cpe['mcim_zone']     = (float)$mz;
+                $cpe['mcim_colonies'] = $mc;
+                $cpe['mcim_result']   = $mr;
+                if ($mr === 'Positive') {
+                    $why2 = $label . ': eCIM is required because mCIM is Positive -- ';
+                    $em = $field('ecim_method');
+                    $ez = $field('ecim_zone');
+                    if (!in_array($em, bdsis_ecim_methods(), true))    { return $fail($why2 . 'choose the eCIM method.'); }
+                    if (!bdsis_cim_zone_valid($ez))                    { return $fail($why2 . 'enter the eCIM zone diameter in whole millimetres (6 mm or more).'); }
+                    $cpe['ecim_method'] = $em;
+                    $cpe['ecim_zone']   = (float)$ez;
+                    $cpe['ecim_result'] = bdsis_ecim_interpret($ez, $mz);
+                }
+                /* Generated, never typed: a posted cpe_result / mcim_result /
+                   ecim_result is ignored. */
+                $cpe['result'] = bdsis_carbapenemase_result($mr, $cpe['ecim_result']);
+            } else {
+                if ($mz !== '' && (!is_numeric($mz) || (float)$mz < 0)) { return $fail($why . 'enter a valid zone diameter, or leave it blank.'); }
+                $ci = $field('cpe_interp');
+                if (!in_array($ci, bdsis_cpe_interpretations(), true)) { return $fail($why . 'select the interpretation (Carbapenemase Positive / Carbapenemase Negative).'); }
+                $cpe['mcim_zone'] = ($mz === '') ? null : (float)$mz;
+                $cpe['result']    = $ci;
+            }
+            $plan['cpe'] = $cpe;
+        }
+        // END ESBL / CARBAPENEMASE CHANGE
+
+        return $plan;
+    }
+}
+
+if (!function_exists('bdsis_bact_resistance_plan')) {
+    /**
+     * Validate and interpret one pathogen row's confirmatory tests from the post.
+     *
+     * Re-derives the triggers from the posted routine zones, then checks that a
+     * triggered test is complete and computes the final interpretations. Nothing
+     * is written here; the caller stores the returned plan with
+     * bdsis_bact_save_resistance() once the row exists. Fields belonging to a
+     * test that was NOT triggered are ignored, and eCIM is ignored unless mCIM
+     * is Positive.
+     *
+     * @param  mysqli $bdsis
+     * @param  mixed  $rowIdx      form row index (pathogen[i])
+     * @param  string $label       row label for messages, e.g. "Enteric Pathogen 2"
+     * @param  array  $codes       posted code[i] (agentIdx => code)
+     * @param  array  $zones       posted zone[i] (agentIdx => zone)
+     * @param  array  $post        the whole request array
+     * @param  array  $breakpoints bdsis_ast_breakpoints()
+     * @return array 'ok', 'error', 'esbl' (null|array), 'cpe' (null|array)
+     */
+    function bdsis_bact_resistance_plan($bdsis, $rowIdx, $label, $codes, $zones, $post, $breakpoints)
+    {
+        $plan = array('ok' => true, 'error' => '', 'esbl' => null, 'cpe' => null);
+        $fail = function ($msg) use (&$plan) { $plan['ok'] = false; $plan['error'] = $msg; return $plan; };
+        $field = function ($name, $sub = null) use ($post, $rowIdx) {
+            if (!isset($post[$name]) || !is_array($post[$name]) || !isset($post[$name][$rowIdx])) { return ''; }
+            $v = $post[$name][$rowIdx];
+            if ($sub !== null) { $v = (is_array($v) && isset($v[$sub])) ? $v[$sub] : ''; }
+            return is_array($v) ? '' : trim((string)$v);
+        };
+
+        /* 1. Routine results, exactly as the AST loop will store them. */
+        $results = array();
+        foreach ((array)$codes as $agentIdx => $rawCode) {
+            $code = strtoupper(trim((string)$rawCode));
+            if ($code === '' || !isset($breakpoints[$code])) { continue; }
+            $zone = (is_array($zones) && isset($zones[$agentIdx])) ? $zones[$agentIdx] : '';
+            $results[$code] = bdsis_ast_interpret_zone($zone, $breakpoints[$code]);
+        }
+        return bdsis_resistance_plan_core($bdsis, $results, $label, $field);
+    }
+}
+
+if (!function_exists('bdsis_resistance_tables')) {
+    /**
+     * Where an isolate's confirmatory results are stored.
+     *
+     * Two owners, one schema: a bacteriology isolate keys off
+     * bacteriology_result_table2.record_id, an E. coli pathotype record off
+     * rcdc_ecoli_pcr_result_table3.record_id. The column lists are identical,
+     * which is what lets one set of functions serve both.
+     *
+     * @param  string $owner 'bact' | 'ecoli'
+     * @return array  'key', 'main', 'esbl'
+     */
+    function bdsis_resistance_tables($owner)
+    {
+        return ((string)$owner === 'ecoli')
+            ? array('key' => 'prt3_record_id', 'main' => 'ecoli_resistance_table',        'esbl' => 'ecoli_esbl_table')
+            : array('key' => 'brt2_id',        'main' => 'bacteriology_resistance_table', 'esbl' => 'bacteriology_esbl_table');
+    }
+}
+
+if (!function_exists('bdsis_resistance_delete')) {
+    /** Remove one isolate's stored ESBL / carbapenemase results. @return bool */
+    function bdsis_resistance_delete($bdsis, $owner, $id)
+    {
+        $id = (int)$id;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+        $t = bdsis_resistance_tables($owner);
+        foreach (array($t['esbl'], $t['main']) as $table) {
+            $q = $bdsis->prepare("DELETE FROM " . $table . " WHERE " . $t['key'] . "=?");
+            if (!$q) { return false; }
+            $q->bind_param("i", $id);
+            $ok = $q->execute();
+            $q->close();
+            if (!$ok) { return false; }
+        }
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_resistance_save')) {
+    /**
+     * Store a validated plan (replace semantics). A null plan, or one with
+     * neither test triggered, simply clears what was stored.
+     *
+     * @return bool
+     */
+    function bdsis_resistance_save($bdsis, $owner, $id, $plan, $user, $today)
+    {
+        $id = (int)$id;
+        if (!bdsis_resistance_delete($bdsis, $owner, $id)) { return false; }
+        if (!is_array($plan) || ($plan['esbl'] === null && $plan['cpe'] === null)) { return true; }
+        $t = bdsis_resistance_tables($owner);
+        $e = $plan['esbl'];
+        $c = $plan['cpe'];
+
+        $q = $bdsis->prepare(
+            "INSERT INTO " . $t['main'] . "
+               (" . $t['key'] . ", esbl_triggered, esbl_trigger_agents, esbl_result,
+                cpe_triggered, cpe_trigger_agents, cpe_agent, mcim_method, mcim_zone, mcim_colonies, mcim_result,
+                ecim_method, ecim_zone, ecim_result, carbapenemase_result, recorded_by, recorded_on)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        if (!$q) { return false; }
+        $esblT = $e ? 1 : 0;   $esblBy = $e ? implode(',', $e['triggered_by']) : null;   $esblR = $e ? $e['result'] : null;
+        $cpeT  = $c ? 1 : 0;   $cpeBy  = $c ? implode(',', $c['triggered_by']) : null;   $ca = ($c && isset($c['agent'])) ? $c['agent'] : null;
+        $mm = $c ? $c['mcim_method'] : null;   $mz = $c ? $c['mcim_zone'] : null;   $mc = $c ? $c['mcim_colonies'] : null;   $mr = $c ? $c['mcim_result'] : null;
+        $em = $c ? $c['ecim_method'] : null;   $ez = $c ? $c['ecim_zone'] : null;   $er = $c ? $c['ecim_result'] : null;      $cr = $c ? $c['result'] : null;
+        $user = (string)$user; $today = (string)$today;
+        $q->bind_param("iississsdsssdssss", $id, $esblT, $esblBy, $esblR, $cpeT, $cpeBy, $ca, $mm, $mz, $mc, $mr, $em, $ez, $er, $cr, $user, $today);
+        $ok = $q->execute();
+        $q->close();
+        if (!$ok) { return false; }
+
+        if ($e) {
+            $d = $bdsis->prepare("INSERT INTO " . $t['esbl'] . " (" . $t['key'] . ", agent_code, esbl_method, zone_diameter) VALUES (?,?,?,?)");
+            if (!$d) { return false; }
+            foreach ($e['agents'] as $code => $row) {
+                $code = (string)$code; $m = (string)$row['method']; $z = (float)$row['zone'];
+                $d->bind_param("issd", $id, $code, $m, $z);
+                if (!$d->execute()) { $d->close(); return false; }
+            }
+            $d->close();
+        }
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_resistance_load')) {
+    /**
+     * One isolate's stored results, for the form and the reports. null when
+     * nothing is stored (or the tables are not installed).
+     *
+     * @return array|null 'esbl' => null|array('triggered_by','result','agents'),
+     *                    'cpe'  => null|array(mcim_*, ecim_*, 'result')
+     */
+    function bdsis_resistance_load($bdsis, $owner, $id)
+    {
+        $id = (int)$id;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return null; }
+        $t = bdsis_resistance_tables($owner);
+        $res = @$bdsis->query("SELECT esbl_triggered, esbl_trigger_agents, esbl_result, cpe_triggered, cpe_trigger_agents, cpe_agent,
+                                      mcim_method, mcim_zone, mcim_colonies, mcim_result, ecim_method, ecim_zone, ecim_result, carbapenemase_result
+                                 FROM " . $t['main'] . " WHERE " . $t['key'] . "=" . $id);
+        if (!$res || $res->num_rows === 0) { return null; }
+        $r = $res->fetch_assoc();
+        $res->free();
+        $out = array('esbl' => null, 'cpe' => null);
+        if ((int)$r['esbl_triggered'] === 1) {
+            $agents = array();
+            $d = @$bdsis->query("SELECT agent_code, esbl_method, zone_diameter FROM " . $t['esbl'] . " WHERE " . $t['key'] . "=" . $id);
+            if ($d) {
+                while (list($code, $m, $z) = $d->fetch_row()) { $agents[(string)$code] = array('method' => (string)$m, 'zone' => ($z === null ? '' : (string)$z)); }
+                $d->free();
+            }
+            $out['esbl'] = array(
+                'triggered_by' => array_filter(explode(',', (string)$r['esbl_trigger_agents'])),
+                'result' => (string)$r['esbl_result'], 'agents' => $agents,
+            );
+        }
+        if ((int)$r['cpe_triggered'] === 1) {
+            $out['cpe'] = array(
+                'triggered_by' => array_filter(explode(',', (string)$r['cpe_trigger_agents'])),
+                'agent' => (string)$r['cpe_agent'],
+                'mcim_method' => (string)$r['mcim_method'], 'mcim_zone' => ($r['mcim_zone'] === null ? '' : (string)$r['mcim_zone']),
+                'mcim_colonies' => (string)$r['mcim_colonies'], 'mcim_result' => (string)$r['mcim_result'],
+                'ecim_method' => (string)$r['ecim_method'], 'ecim_zone' => ($r['ecim_zone'] === null ? '' : (string)$r['ecim_zone']),
+                'ecim_result' => (string)$r['ecim_result'], 'result' => (string)$r['carbapenemase_result'],
+            );
+        }
+        return ($out['esbl'] === null && $out['cpe'] === null) ? null : $out;
+    }
+}
+
+/* ---- Bacteriology entry points. Names, arguments and behaviour unchanged. ---- */
+
+if (!function_exists('bdsis_bact_delete_resistance')) {
+    /** @return bool false when the tables are not installed */
+    function bdsis_bact_delete_resistance($bdsis, $brt2id)
+    {
+        return bdsis_resistance_delete($bdsis, 'bact', $brt2id);
+    }
+}
+
+if (!function_exists('bdsis_bact_save_resistance')) {
+    /** @return bool */
+    function bdsis_bact_save_resistance($bdsis, $brt2id, $plan, $user, $today)
+    {
+        return bdsis_resistance_save($bdsis, 'bact', $brt2id, $plan, $user, $today);
+    }
+}
+
+if (!function_exists('bdsis_bact_load_resistance')) {
+    /**
+     * Returns ESBL / CPE / AmpC results for a bacteriology isolate, merged so
+     * bdsis_bact_resistance_panels_html() can render all three panels in a
+     * single call. ESBL/CPE come from bdsis_resistance_load (unchanged); the
+     * AmpC branch comes from bdsis_ampc_load and is a no-op until the
+     * 2026-10-01-ampc-test migration has run.
+     *
+     * @return array|null
+     */
+    function bdsis_bact_load_resistance($bdsis, $brt2id)
+    {
+        $out = bdsis_resistance_load($bdsis, 'bact', $brt2id);
+        $ampc = function_exists('bdsis_ampc_load') ? bdsis_ampc_load($bdsis, $brt2id) : null;
+        if ($ampc !== null) {
+            if ($out === null) { $out = array('esbl' => null, 'cpe' => null); }
+            $out['ampc'] = $ampc;
+        }
+        return $out;
+    }
+}
+
+/* ---- E. coli pathotype entry points (rcdc_ecoli_pcr_result_table3.record_id). ---- */
+
+if (!function_exists('bdsis_ecoli_delete_resistance')) {
+    /** @return bool */
+    function bdsis_ecoli_delete_resistance($bdsis, $prt3rid)
+    {
+        return bdsis_resistance_delete($bdsis, 'ecoli', $prt3rid);
+    }
+}
+
+if (!function_exists('bdsis_ecoli_save_resistance')) {
+    /** @return bool */
+    function bdsis_ecoli_save_resistance($bdsis, $prt3rid, $plan, $user, $today)
+    {
+        return bdsis_resistance_save($bdsis, 'ecoli', $prt3rid, $plan, $user, $today);
+    }
+}
+
+if (!function_exists('bdsis_ecoli_load_resistance')) {
+    /** @return array|null */
+    function bdsis_ecoli_load_resistance($bdsis, $prt3rid)
+    {
+        return bdsis_resistance_load($bdsis, 'ecoli', $prt3rid);
+    }
+}
+
+if (!function_exists('bdsis_bact_resistance_report_rows')) {
+    /**
+     * Report rows (8-column table, matching the AST rows around them) for an
+     * isolate's ESBL / carbapenemase results. '' when nothing was triggered or
+     * stored, so a report never shows an empty section.
+     *
+     * @return string
+     */
+    function bdsis_bact_resistance_report_rows($bdsis, $brt2id)
+    {
+        return bdsis_resistance_report_rows_for($bdsis, bdsis_bact_load_resistance($bdsis, $brt2id));
+    }
+}
+
+if (!function_exists('bdsis_ecoli_resistance_report_rows')) {
+    /** The same rows for an E. coli pathotype record. @return string */
+    function bdsis_ecoli_resistance_report_rows($bdsis, $prt3rid)
+    {
+        return bdsis_resistance_report_rows_for($bdsis, bdsis_ecoli_load_resistance($bdsis, $prt3rid));
+    }
+}
+
+if (!function_exists('bdsis_resistance_report_rows_for')) {
+    /** Report rows for an already-loaded record. @return string */
+    function bdsis_resistance_report_rows_for($bdsis, $r)
+    {
+        if ($r === null) { return ''; }
+        $h  = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $u  = function ($v) use ($h) { $v = trim((string)$v); return '<u>' . ($v === '' ? '-' : $h($v)) . '</u>'; };
+        $html = '';
+
+        if ($r['esbl'] !== null) {
+            $e = $r['esbl'];
+            $html .= '<tr><td colspan=8><label><B>ESBL Test</B> &mdash; triggered: ' . $h(implode(', ', $e['triggered_by'])) . ' Resistant</label></td></tr>';
+            $html .= '<tr><td colspan=2><label><B>Antibiotic</B></label></td><td colspan=2><label><B>Method</B></label></td>'
+                   . '<td colspan=2><label><B>Zone Diameter</B></label></td><td colspan=2><label><B>Increase vs plain disc</B></label></td></tr>';
+            $agents = bdsis_esbl_agents($bdsis);
+            foreach ($agents as $code => $ag) {
+                if (!isset($e['agents'][$code])) { continue; }
+                $row  = $e['agents'][$code];
+                $diff = '';
+                if ($ag['pair'] !== '' && isset($e['agents'][$ag['pair']]) && $row['zone'] !== '' && $e['agents'][$ag['pair']]['zone'] !== '') {
+                    $d = (float)$row['zone'] - (float)$e['agents'][$ag['pair']]['zone'];
+                    $diff = ($d >= 0 ? '+' : '') . rtrim(rtrim(number_format($d, 1, '.', ''), '0'), '.') . ' mm';
+                }
+                $html .= '<tr><td colspan=2><label>' . $u($ag['label'] . ' (' . html_entity_decode($ag['content']) . ')') . '</label></td>'
+                       . '<td colspan=2><label>' . $u($row['method']) . '</label></td>'
+                       . '<td colspan=2><label>' . $u($row['zone']) . '</label></td>'
+                       . '<td colspan=2><label>' . ($diff === '' ? '' : $u($diff)) . '</label></td></tr>';
+            }
+            $html .= '<tr><td colspan=8><label>Final ESBL Status: <B>' . $u($e['result']) . '</B></label></td></tr>';
+        }
+
+        if ($r['cpe'] !== null) {
+            $c = $r['cpe'];
+            // START ESBL / CARBAPENEMASE CHANGE
+            $isMcim = ($c['mcim_method'] === 'mCIM');
+            /* Carbapenem disc: code plus the master name when it resolves. */
+            $agentTxt = $c['agent'];
+            if ($agentTxt !== '') {
+                $an = @$bdsis->query("SELECT antimicrobial_agent FROM ms_ast_table WHERE ast_method_id='01' AND code='" . $bdsis->real_escape_string($agentTxt) . "'");
+                if ($an && $an->num_rows > 0) { list($anName) = $an->fetch_row(); if ((string)$anName !== '') { $agentTxt .= ' (' . $anName . ')'; } }
+            }
+            $html .= '<tr><td colspan=8><label><B>Carbapenems Test</B> &mdash; triggered: ' . $h(implode(', ', $c['triggered_by'])) . ' Resistant/Intermediate</label></td></tr>';
+            $html .= '<tr><td colspan=8><label>Antibiotic: ' . $u($agentTxt) . '</label></td></tr>';
+            $html .= '<tr><td colspan=2><label><B>Test</B></label></td><td colspan=2><label><B>Method</B></label></td>'
+                   . '<td colspan=2><label><B>Zone Diameter</B></label></td><td colspan=2><label><B>Interpretation</B></label></td></tr>';
+            $html .= '<tr><td colspan=2><label>' . ($isMcim ? 'mCIM' : 'Carbapenemase')
+                   . ($isMcim && $c['mcim_colonies'] !== '' ? ' (colonies within zone: ' . $h($c['mcim_colonies']) . ')' : '') . '</label></td>'
+                   . '<td colspan=2><label>' . $u($c['mcim_method']) . '</label></td>'
+                   . '<td colspan=2><label>' . $u($c['mcim_zone']) . '</label></td>'
+                   . '<td colspan=2><label>' . $u($isMcim ? $c['mcim_result'] : $c['result']) . '</label></td></tr>';
+            if ($isMcim && $c['mcim_result'] === 'Positive' && $c['ecim_method'] !== '') {
+                /* The measured difference the MBL / serine call is made on, shown
+                   the way the ESBL pair shows its increase. */
+                $eDiff = '';
+                if ($c['ecim_zone'] !== '' && $c['mcim_zone'] !== '') {
+                    $d = (float)$c['ecim_zone'] - (float)$c['mcim_zone'];
+                    $eDiff = ' (' . ($d >= 0 ? '+' : '') . rtrim(rtrim(number_format($d, 1, '.', ''), '0'), '.') . ' mm vs mCIM)';
+                }
+                $html .= '<tr><td colspan=2><label>eCIM' . $h($eDiff) . '</label></td>'
+                       . '<td colspan=2><label>' . $u($c['ecim_method']) . '</label></td>'
+                       . '<td colspan=2><label>' . $u($c['ecim_zone']) . '</label></td>'
+                       . '<td colspan=2><label>' . $u($c['ecim_result']) . '</label></td></tr>';
+            } elseif ($isMcim) {
+                /* The requirement is explicit that a non-positive mCIM stops here. */
+                $html .= '<tr><td colspan=2><label>eCIM</label></td>'
+                       . '<td colspan=6><label><u>eCIM not required</u></label></td></tr>';
+            } else {
+                $html .= '<tr><td colspan=2><label>eCIM</label></td>'
+                       . '<td colspan=6><label><u>Not applicable (method: ' . $h($c['mcim_method']) . ')</u></label></td></tr>';
+            }
+            $html .= '<tr><td colspan=8><label>Carbapenemase Result: <B>' . $u($c['result']) . '</B></label></td></tr>';
+            // END ESBL / CARBAPENEMASE CHANGE
+        }
+
+        return $html;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_ast_results')) {
+    /**
+     * What one E. coli AST panel has actually recorded: code => interpretation.
+     *
+     * This is what the ESBL / carbapenemase triggers read, and it is deliberately
+     * the RECORDED interpretation rather than anything re-derived from a number:
+     *
+     *   Disk Diffusion  the zone read through the same CLSI thresholds the save
+     *                   applies, so the trigger and the stored ast_result agree.
+     *   MIC             the reader's own S / I / R / SDD / N/A. An MIC value is
+     *                   never classified here -- 16 mg/L means nothing without a
+     *                   breakpoint for that organism, so only what the reader
+     *                   stated counts. SDD and N/A trigger nothing.
+     *
+     * @param  mysqli $bdsis
+     * @param  string $methodId    ms_ast_method_table id posted for the panel
+     * @param  string $letter      the panel's suffix in the flat field names (a..l)
+     * @param  array  $post        $_POST
+     * @param  array  $breakpoints bdsis_ast_breakpoints()
+     * @param  array  $micRows     validated rows from bdsis_ecoli_mic_parse()
+     * @return array  code => interpretation
+     */
+    function bdsis_ecoli_ast_results($bdsis, $methodId, $letter, $post, $breakpoints, $micRows = array())
+    {
+        $out = array();
+        $methodId = (string)$methodId;
+
+        if ($methodId === '01') {
+            $cntrKey = 'cntr' . $letter;
+            $cntr = (isset($post[$cntrKey]) && !is_array($post[$cntrKey])) ? (int)$post[$cntrKey] : 0;
+            for ($i = 1; $i <= $cntr; $i++) {
+                $cKey = 'code' . $letter . $i;
+                $zKey = 'zone' . $letter . $i;
+                $code = (isset($post[$cKey]) && !is_array($post[$cKey])) ? strtoupper(trim((string)$post[$cKey])) : '';
+                $zone = (isset($post[$zKey]) && !is_array($post[$zKey])) ? $post[$zKey] : '';
+                if ($code === '' || !isset($breakpoints[$code])) { continue; }
+                $out[$code] = bdsis_ast_interpret_zone($zone, $breakpoints[$code]);
+            }
+            return $out;
+        }
+
+        if ($methodId === bdsis_mic_method_id()) {
+            foreach ((array)$micRows as $row) {
+                if (!is_array($row) || !isset($row['code'])) { continue; }
+                $out[strtoupper((string)$row['code'])] = isset($row['result']) ? (string)$row['result'] : '';
+            }
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_panel_label')) {
+    /**
+     * A pathotype panel's name for a message, e.g. "EAEC AST".
+     * Falls back to "E.coli AST" when the record cannot be resolved.
+     *
+     * \@return string
+     */
+    function bdsis_ecoli_panel_label($bdsis, $prt3rid)
+    {
+        $id = (int)$prt3rid;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return 'E.coli AST'; }
+        $q = $bdsis->prepare("SELECT s.ecoli_strain FROM rcdc_ecoli_pcr_result_table3 p3
+                                JOIN ms_ecoli_strain_table s ON s.strain_id = p3.ecoli_strain_id
+                               WHERE p3.record_id = ?");
+        if (!$q) { return 'E.coli AST'; }
+        $q->bind_param("i", $id);
+        $q->execute();
+        $q->bind_result($name);
+        $found = $q->fetch();
+        $q->close();
+        return ($found && trim((string)$name) !== '') ? trim((string)$name) . ' AST' : 'E.coli AST';
+    }
+}
+
+if (!function_exists('bdsis_ecoli_resistance_key')) {
+    /**
+     * The key an E. coli panel's confirmatory fields post under.
+     *
+     * The bacteriology form indexes them by its row number; the E. coli form has
+     * no row numbers, so it uses the pathotype record id with an 'E' in front.
+     * That also keeps the rendered ids unique when both forms are on the page.
+     *
+     * @return string
+     */
+    function bdsis_ecoli_resistance_key($prt3rid) { return 'E' . (int)$prt3rid; }
+}
+
+if (!function_exists('bdsis_ecoli_resistance_plan')) {
+    /**
+     * Validate the ESBL / carbapenemase panels posted with one E. coli AST panel.
+     *
+     * Same rules as a bacteriology isolate -- the shared core decides -- only the
+     * posted field layout differs.
+     *
+     * @param  mysqli $bdsis
+     * @param  string $prt3rid rcdc_ecoli_pcr_result_table3.record_id
+     * @param  string $label   panel name, used in the refusal messages
+     * @param  array  $results bdsis_ecoli_ast_results()
+     * @param  array  $post    $_POST
+     * @return array  'ok', 'error', 'esbl', 'cpe'
+     */
+    function bdsis_ecoli_resistance_plan($bdsis, $prt3rid, $label, $results, $post)
+    {
+        $key = bdsis_ecoli_resistance_key($prt3rid);
+        $field = function ($name, $sub = null) use ($post, $key) {
+            if (!isset($post[$name]) || !is_array($post[$name]) || !isset($post[$name][$key])) { return ''; }
+            $v = $post[$name][$key];
+            if ($sub !== null) { $v = (is_array($v) && isset($v[$sub])) ? $v[$sub] : ''; }
+            return is_array($v) ? '' : trim((string)$v);
+        };
+        return bdsis_resistance_plan_core($bdsis, $results, $label, $field);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Conditional ESBL / carbapenemase sub-panels.
+   Moved here from lab/lab.php so lab/load-ecoli-ast.php can render the same
+   two panels for an E. coli pathotype record. The markup, field names and
+   ids are unchanged; the caller decides the index, and the E.coli panel uses
+   'E' . prt3_record_id so its ids cannot collide with a pathogen row's.
+   --------------------------------------------------------------------------- */
+
+if(!function_exists('bdsis_bact_resistance_panels_html')){
+    /**
+     * The two conditional sub-panels rendered inside a pathogen row's AST
+     * panel: ESBL Test and Carbapenemase Test (mCIM, then eCIM). Both
+     * start hidden unless the row already holds a saved result; the
+     * browser shows them when the routine zones trigger them
+     * (bpResistanceSync) and iu-lab.php re-derives the triggers on save.
+     * Field names are indexed by row like the rest of the block.
+     */
+    function bdsis_bact_resistance_panels_html($idx, $resist, $esblAgents)
+    {
+        $hv = function($v){ return htmlspecialchars((string)$v, ENT_QUOTES); };
+        /* $cls: extra classes for the <select> (e.g. the result pill). */
+        $sel = function($name, $id, $opts, $cur, $placeholder, $attrs = '', $cls = '') use ($hv) {
+            $s = '<select class="form-control'.($cls !== '' ? ' '.$cls : '').'" name="'.$name.'" id="'.$id.'" '.$attrs.'>';
+            $s .= '<option value="">'.$hv($placeholder).'</option>';
+            foreach($opts as $o){ $s .= '<option value="'.$hv($o).'"'.((string)$o === (string)$cur ? ' selected' : '').'>'.$hv($o).'</option>'; }
+            return $s.'</select>';
+        };
+        $e = (is_array($resist) && isset($resist['esbl']) && is_array($resist['esbl'])) ? $resist['esbl'] : null;
+        $c = (is_array($resist) && isset($resist['cpe'])  && is_array($resist['cpe']))  ? $resist['cpe']  : null;
+
+        /* Layout (lab-results.css): every toggled container (#bpEsbl, #bpCpe,
+           #bpEcim, #bpEcimNa, #bpMcimHint and the cell wrappers) is a plain block
+           so style.display='block' cannot collapse a grid; the rows inside are
+           .row.lr-line on the same 3 / 3 / 2 / 4 columns as the routine panel.
+           Each field keeps its name, id, handler and required state. */
+        $gridHead = function($c1, $c2, $c3, $c4){
+            return '<div class="row lr-grid-head d-none d-md-flex"><div class="col-md-3">'.$c1.'</div><div class="col-md-3">'.$c2.'</div>'
+                 . '<div class="col-md-2">'.$c3.'</div><div class="col-md-4">'.$c4.'</div></div>';
+        };
+        $help = function($text){ return '<div class="lr-help"><i class="fas fa-info-circle" aria-hidden="true"></i><span>'.$text.'</span></div>'; };
+
+        /* ---- ESBL Test ---- */
+        $h  = '<div class="lr-reveal bp-esbl" id="bpEsbl'.$idx.'" style="display:'.($e ? 'block' : 'none').';">';
+        $h .= '<div class="lr-subcard lr-subcard--esbl">';
+        $h .= '<div class="lr-subcard__head"><h4 class="lr-subcard__title">ESBL Test</h4>'
+            . '<span class="lr-trigger"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i>Required &mdash; <span class="bp-esbl-why">'.$hv($e ? implode(', ', $e['triggered_by']) : '').'</span> Resistant</span></div>';
+        $h .= $gridHead('Antibiotic', 'Method', 'Zone (mm)', 'Increase vs plain disc');
+        foreach($esblAgents as $code => $ag){
+            $cur  = ($e && isset($e['agents'][$code])) ? $e['agents'][$code] : array('method'=>'', 'zone'=>'');
+            $mId  = 'bpEsblMethod'.$idx.'_'.$code;
+            $zId  = 'bpEsblZone'.$idx.'_'.$code;
+            $h .= '<div class="row lr-line">';
+            $h .= '<div class="col-md-3 lr-cell lr-cell--name"><span class="lr-agent">'.$hv($ag['label']).' <small>'.$ag['content'].'</small></span>'
+                . '<span class="lr-agent-sub">'.$hv($ag['agent']).'</span></div>';
+            $h .= '<div class="col-md-3 lr-cell"><label class="lr-cell-label" for="'.$mId.'">'.$hv($ag['label']).' method:</label>'
+                . $sel('esbl_method['.$idx.']['.$code.']', $mId, bdsis_esbl_methods(), $cur['method'], 'Select Method', 'onchange="bpEsblInterpret(\''.$idx.'\');"').'</div>';
+            $h .= '<div class="col-6 col-md-2 lr-cell"><label class="lr-cell-label" for="'.$zId.'">Zone (mm)<span class="sr-only">, '.$hv($ag['label']).'</span>:</label>'
+                . '<input type="number" step="any" min="0" name="esbl_zone['.$idx.']['.$code.']" id="'.$zId.'"'
+                . ' class="form-control text-center bp-esbl-zone" data-code="'.$hv($code).'" data-pair="'.$hv($ag['pair']).'" data-rule="'.$hv($ag['rule']).'"'
+                . ' value="'.$hv($cur['zone']).'" oninput="bpEsblInterpret(\''.$idx.'\');" /></div>';
+            if($ag['pair'] !== ''){
+                $dId = 'bpEsblDiff'.$idx.'_'.$code;
+                $h .= '<div class="col-6 col-md-4 lr-cell"><label class="lr-cell-label" for="'.$dId.'">Increase<span class="sr-only"> vs '.$hv($ag['pair']).'</span>:</label>'
+                    . '<input type="text" class="form-control lr-pill bp-esbl-diff" id="'.$dId.'" readonly tabindex="-1" placeholder="Increase vs '.$hv($ag['pair']).'" /></div>';
+            }else{
+                $h .= '<div class="col-6 col-md-4 lr-cell"><span class="lr-muted-cell">Plain disc &mdash; reference</span></div>';
+            }
+            $h .= '</div>';
+        }
+        $h .= '<div class="row lr-line lr-line--result">'
+            . '<div class="col-md-8 lr-cell lr-cell--name"><span class="lr-agent">Final ESBL Status <span class="required-star" aria-hidden="true">*</span></span>'
+            . '<span class="lr-agent-sub">Filled from a complete combination-disk pair; choose it for E-test or Other.</span></div>'
+            . '<div class="col-md-4 lr-cell"><label class="lr-cell-label" for="bpEsblResult'.$idx.'">Final ESBL Status:</label>'
+            . $sel('esbl_result['.$idx.']', 'bpEsblResult'.$idx, bdsis_esbl_interpretations(), ($e ? $e['result'] : ''), 'Select Interpretation', 'required', 'lr-pill-select').'</div></div>';
+        $h .= $help('Combination disk: a zone increase of 5 mm or more with clavulanate over the same agent alone confirms an ESBL producer. Both discs of the pair must be read by combination disk; the server applies the same rule on save.');
+        $h .= '</div></div>';
+
+        /* ---- Carbapenems Test ---- */
+        // START ESBL / CARBAPENEMASE CHANGE
+        /* Antibiotic (IMI / EPT / MER), then the method. mCIM follows the
+           decision rule; Carba NP / PCR / Other take a stated interpretation
+           instead (bpMcimInterpret switches the rows). Mode-dependent
+           controls carry data-was-required so bpSetRequiredWithin() restores
+           them, and bpMcimInterpret() then narrows them to the active mode. */
+        $cMethod  = $c ? $c['mcim_method'] : '';
+        $cIsMcim  = ($cMethod === '' || $cMethod === 'mCIM');
+        $cAgents  = bdsis_bact_trigger_codes();
+        $cAgentNm = array('IMI' => 'Imipenem', 'EPT' => 'Ertapenem', 'MER' => 'Meropenem');
+        $cAgentSel = '<select class="form-control" name="cpe_agent['.$idx.']" id="bpCpeAgent'.$idx.'" required><option value="">Select Antibiotic</option>';   // markup unchanged; placed in the grid below
+        foreach($cAgents['cpe'] as $ac){
+            $cAgentSel .= '<option value="'.$hv($ac).'"'.(($c && $c['agent'] === $ac) ? ' selected' : '').'>'
+                       . $hv((isset($cAgentNm[$ac]) ? $cAgentNm[$ac].' ' : '').'('.$ac.')').'</option>';
+        }
+        $cAgentSel .= '</select>';
+
+        $h .= '<div class="lr-reveal bp-cpe" id="bpCpe'.$idx.'" style="display:'.($c ? 'block' : 'none').';">';
+        $h .= '<div class="lr-subcard lr-subcard--cpe">';
+        $h .= '<div class="lr-subcard__head"><h4 class="lr-subcard__title">Carbapenems Test</h4>'
+            . '<span class="lr-trigger"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i>Required &mdash; <span class="bp-cpe-why">'.$hv($c ? implode(', ', $c['triggered_by']) : '').'</span> Resistant / Intermediate</span></div>';
+        /* Two fields to a row, in the order the reader works through them:
+           Antibiotic / Method, then Zone / Colonies, then the two
+           interpretations, then the generated result across the full width.
+           col-sm-* so the panel collapses where every other Lab form does. */
+
+        /* Row 1 -- what was tested, and how. */
+        $h .= '<div class="row lr-line">';
+        $h .= '<div class="col-md-6 lr-cell"><label class="lr-cell-label" for="bpCpeAgent'.$idx.'">Antibiotic:</label>'.$cAgentSel.'</div>';
+        $h .= '<div class="col-md-6 lr-cell"><label class="lr-cell-label" for="bpMcimMethod'.$idx.'">Method:</label>'
+            . $sel('mcim_method['.$idx.']', 'bpMcimMethod'.$idx, bdsis_mcim_methods(), $cMethod, 'Select Method', 'required onchange="bpMcimInterpret(\''.$idx.'\');"')
+            . '<small class="lr-inline-error" id="bpCpeEcimFirst'.$idx.'" style="display:none;">eCIM is performed only after a Positive mCIM. Choose mCIM here; the eCIM row appears when mCIM is Positive.</small></div>';
+        $h .= '</div>';
+
+        /* Row 2 -- the reading. Colonies is its own column now rather than a
+           stack under the zone, and disappears with the column when the method
+           is not mCIM. */
+        $h .= '<div class="row lr-line">';
+        $h .= '<div class="col-md-6 lr-cell"><label class="lr-cell-label" for="bpMcimZone'.$idx.'">Zone Diameter (mm):</label>'
+            . '<input type="number" '.($cIsMcim ? 'step="1" min="6" required' : 'step="any" min="0"').' data-was-required="1" name="mcim_zone['.$idx.']" id="bpMcimZone'.$idx.'" class="form-control text-center"'
+            . ' value="'.$hv($c ? $c['mcim_zone'] : '').'" oninput="bpMcimInterpret(\''.$idx.'\');" /></div>';
+        $h .= '<div class="col-md-6 lr-cell" id="bpMcimColWrap'.$idx.'" style="display:'.($cIsMcim ? 'block' : 'none').';">'
+            . '<label class="lr-cell-label" for="bpMcimColonies'.$idx.'">Colonies within zone:</label>'
+            . $sel('mcim_colonies['.$idx.']', 'bpMcimColonies'.$idx, array('Yes', 'No'), ($c ? $c['mcim_colonies'] : ''), 'Select', ($cIsMcim ? 'required ' : '').'data-was-required="1" onchange="bpMcimInterpret(\''.$idx.'\');"').'</div>';
+        $h .= '</div>';
+
+        /* Row 3 -- the mCIM reading on the left, eCIM on the right. Only one of
+           the two interpretation controls applies at a time, and only one of the
+           two eCIM panels; the JS swaps them by id exactly as before. */
+        $ecimOn = ($c && $c['mcim_result'] === 'Positive');
+        $ecimNote = ($ecimOn ? 'display:none;' : 'display:block;');
+        $h .= '<div class="row lr-line">';
+        $h .= '<div class="col-md-6 lr-cell">'
+            . '<div id="bpMcimResWrap'.$idx.'" style="display:'.($cIsMcim ? 'block' : 'none').';"><label class="lr-cell-label" for="bpMcimResult'.$idx.'">mCIM Interpretation:</label>'
+            . '<input type="text" name="mcim_result['.$idx.']" id="bpMcimResult'.$idx.'" class="form-control lr-pill" readonly tabindex="-1" placeholder="mCIM result" value="'.$hv($c ? $c['mcim_result'] : '').'" /></div>'
+            . '<div id="bpCpeInterpWrap'.$idx.'" style="display:'.($cIsMcim ? 'none' : 'block').';"><label class="lr-cell-label" for="bpCpeInterp'.$idx.'">Interpretation:</label>'
+            . $sel('cpe_interp['.$idx.']', 'bpCpeInterp'.$idx, bdsis_cpe_interpretations(), (($c && !$cIsMcim) ? $c['result'] : ''), 'Select Interpretation', (!$cIsMcim ? 'required ' : '').'data-was-required="1" onchange="bpMcimInterpret(\''.$idx.'\');"', 'lr-pill-select').'</div>'
+            . '</div>';
+
+        $h .= '<div class="col-md-6 lr-cell">';
+        /* eCIM, once mCIM reads Positive. */
+        $h .= '<div class="lr-reveal bp-ecim" id="bpEcim'.$idx.'" style="display:'.($ecimOn ? 'block' : 'none').';">';
+        $h .= '<label class="lr-cell-label" for="bpEcimMethod'.$idx.'">eCIM <span class="required-star" aria-hidden="true">*</span>'
+            . '<span class="lr-agent-sub">Required &mdash; mCIM is Positive</span></label>';
+        $h .= '<div class="row">';
+        $h .= '<div class="col-6"><label class="lr-mini-label" for="bpEcimMethod'.$idx.'">Method:</label>'
+            . $sel('ecim_method['.$idx.']', 'bpEcimMethod'.$idx, bdsis_ecim_methods(), ($c ? $c['ecim_method'] : ''), 'Select Method', 'required').'</div>';
+        $h .= '<div class="col-6"><label class="lr-mini-label" for="bpEcimZone'.$idx.'">Zone (mm)<span class="sr-only">, eCIM</span>:</label>'
+            . '<input type="number" step="1" min="6" name="ecim_zone['.$idx.']" id="bpEcimZone'.$idx.'" class="form-control text-center" required'
+            . ' value="'.$hv($c ? $c['ecim_zone'] : '').'" oninput="bpEcimInterpret(\''.$idx.'\');" /></div>';
+        $h .= '<div class="col-6"><label class="lr-mini-label" for="bpEcimDiff'.$idx.'">Increase vs mCIM:</label>'
+            . '<input type="text" class="form-control text-center lr-pill" id="bpEcimDiff'.$idx.'" readonly tabindex="-1" placeholder="&ndash;" /></div>';
+        $h .= '<div class="col-6"><label class="lr-mini-label" for="bpEcimResult'.$idx.'">Result<span class="sr-only">, eCIM</span>:</label>'
+            . '<input type="text" name="ecim_result['.$idx.']" id="bpEcimResult'.$idx.'" class="form-control lr-pill" readonly tabindex="-1" placeholder="eCIM result" value="'.$hv($c ? $c['ecim_result'] : '').'" /></div>';
+        $h .= '</div>';
+        $h .= '</div>';
+        /* ...or the note that stands in its place. */
+        $h .= '<div class="lr-reveal bp-ecim-na" id="bpEcimNa'.$idx.'" style="'.$ecimNote.'">'
+            . '<label class="lr-cell-label" for="bpEcimNaText'.$idx.'">eCIM:</label>'
+            . '<input type="text" class="form-control lr-pill" id="bpEcimNaText'.$idx.'" value="'.($cIsMcim ? 'eCIM not required' : 'Not applicable for this method').'" readonly tabindex="-1" /></div>';
+        $h .= '</div>';
+        $h .= '</div>';
+        /* Final result. */
+        $h .= '<div class="row lr-line lr-line--result">'
+            . '<div class="col-md-8 lr-cell lr-cell--name"><span class="lr-agent">Carbapenemase Result</span>'
+            . '<span class="lr-agent-sub">Generated from mCIM / eCIM; stated for Carba NP, PCR or Other.</span></div>'
+            . '<div class="col-md-4 lr-cell"><label class="lr-cell-label" for="bpCpeResult'.$idx.'">Carbapenemase Result:</label>'
+            . '<input type="text" name="cpe_result['.$idx.']" id="bpCpeResult'.$idx.'" class="form-control lr-pill" readonly tabindex="-1" placeholder="Pending" value="'.$hv($c ? $c['result'] : '').'" /></div></div>';
+
+        /* Rule reminders. #bpMcimHint is toggled with style.display, so the
+           banner sits inside it rather than being it. */
+        $h .= '<div id="bpMcimHint'.$idx.'" style="display:'.($cIsMcim ? 'block' : 'none').';">'
+            . $help('mCIM (whole mm, 6 or more): 6&ndash;15 mm = Positive; 16&ndash;18 mm = Positive with colonies in the zone, otherwise Indeterminate; 19 mm or more = Negative, or Indeterminate with colonies. eCIM 5 mm or more larger than mCIM = Metallo-&beta;-lactamase (MBL) detected; less than 5 mm = Serine carbapenemase detected.')
+            . '</div>';
+        $h .= '</div></div>';
+
+        /* ---- AmpC β-Lactamase Test (additive, separate from ESBL/CPE above) ----
+           Auto-triggered by CTX+CRO+CAZ all Resistant on the routine AST. All
+           markup, cut-off logic, parse / save / load live in includes/lab-ampc.php
+           and have no influence on the ESBL or CPE pipelines above -- those are
+           byte-identical to pre-AmpC behaviour. */
+        if (function_exists('bdsis_ampc_panel_html')) {
+            $ampcSaved = (is_array($resist) && isset($resist['ampc']) && is_array($resist['ampc'])) ? $resist['ampc'] : null;
+            $h .= bdsis_ampc_panel_html($idx, $ampcSaved);
+        }
+
+        return $h;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_resistance_panels')) {
+    /**
+     * The ESBL / carbapenemase panels for one E. coli pathotype record, ready to
+     * drop under its AST tiles (lab/load-ecoli-ast.php).
+     *
+     * Empty when there is no saved pathotype record to hang the results on: the
+     * confirmatory tables key off rcdc_ecoli_pcr_result_table3.record_id, so
+     * until the PCR pathotype is saved there is nothing to store against.
+     *
+     * \@return string
+     */
+    function bdsis_ecoli_resistance_panels($bdsis, $prt3rid)
+    {
+        $id = (int)$prt3rid;
+        if ($id <= 0 || !($bdsis instanceof mysqli)) { return ''; }
+        $idx = bdsis_ecoli_resistance_key($id);
+        $html = bdsis_bact_resistance_panels_html($idx, bdsis_ecoli_load_resistance($bdsis, $id), bdsis_esbl_agents($bdsis));
+        return '<div class="col-12 eco-resistance" data-ecoidx="' . htmlspecialchars($idx, ENT_QUOTES) . '" data-prt3="' . $id . '">' . $html . '</div>';
+    }
+}
+
+/* E. coli AST MIC entries (method 02). */
+require_once __DIR__ . "/lab-mic.php";

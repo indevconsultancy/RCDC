@@ -1,0 +1,1 @@
+<!-- disable delete button for patient details if other records exist. -->

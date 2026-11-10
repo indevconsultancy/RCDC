@@ -1,0 +1,122 @@
+<?php require_once __DIR__ . '/_inc.php'; ?>
+<?php
+/* Sites / Health Centers live in commondb.ms_health_center_table and are
+   shared by every sibling RCDC surveillance system. BDSIS shows them here
+   read-only for reference. The one BDSIS-scoped write is the `dsis` flag --
+   it decides only whether a site is offered in the case chooser and BDSIS
+   reports, so toggling it does not affect any other system. Every other edit
+   (add site, rename, change dzongkhag or status) belongs in the shared
+   administration portal (COMMONNEW). */
+
+$rows = array();
+$sql = "SELECT h.center_id, h.center_code, h.center_name, h.dzongkhag_code, d.dzongkhag_name, h.status, h.dsis
+          FROM ms_health_center_table h
+          LEFT JOIN ms_dzongkhag_table d ON d.dzongkhag_code = h.dzongkhag_code
+         ORDER BY h.center_name";
+$res = $commondb->query($sql);
+if ($res) {
+    while (list($cid, $ccode, $cname, $dzc, $dzn, $st, $dsis) = $res->fetch_row()) {
+        $rows[] = array(
+            'cid'=>(string)$cid, 'ccode'=>(string)$ccode, 'cname'=>(string)$cname,
+            'dzc'=>(string)$dzc, 'dzn'=>(string)$dzn,
+            'status'=>(int)$st, 'dsis'=>(int)$dsis,
+        );
+    }
+    $res->free();
+}
+?>
+<?php require_once __DIR__ . '/../includes/header.php'; ?>
+<?php require_once __DIR__ . '/../includes/css-jquery.php'; ?>
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+  <?php require_once __DIR__ . '/../includes/top-navbar.php'; ?>
+  <?php require_once __DIR__ . '/../includes/sidebar-menu.php'; ?>
+
+  <div class="content-wrapper">
+    <section class="content-header">
+      <div class="container-fluid">
+        <div class="row mb-2">
+          <div class="col-sm-8">
+            <h1 class="m-0">Sites / Health Centers</h1>
+            <p class="text-muted mb-0" style="font-size:.86rem;">
+              Cross-app master &mdash; read-only from BDSIS. The <code>dsis</code> toggle controls only BDSIS participation.
+            </p>
+          </div>
+          <div class="col-sm-4">
+            <ol class="breadcrumb float-sm-right">
+              <li class="breadcrumb-item"><a href="../dashboard/dashboard.php">Dashboard</a></li>
+              <li class="breadcrumb-item"><a href="index.php">Master Data</a></li>
+              <li class="breadcrumb-item active">Sites</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="container-fluid">
+        <?= mdFlashRender(); ?>
+
+        <div class="alert alert-warning" style="font-size:.9rem;">
+          <strong>Cross-app note.</strong> This master is shared with every RCDC surveillance
+          system on this server. Adding, renaming or disabling a centre must be done in the
+          shared administration portal &mdash; not here &mdash; so the other systems stay
+          consistent with BDSIS. The one exception is <code>dsis</code>, the BDSIS
+          participation flag, which affects only this system's case chooser and reports.
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">All centres</h3></div>
+          <div class="card-body p-0">
+            <table id="tblSites" class="table table-hover table-sm" style="width:100%;">
+              <thead>
+                <tr>
+                  <th>Code</th><th>Centre</th><th>District</th>
+                  <th class="text-center">Active</th>
+                  <th class="text-center" style="width:170px;">BDSIS sentinel (<code>dsis</code>)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($rows as $r): ?>
+                  <tr class="<?= $r['status']===1 ? '' : 'text-muted'; ?>">
+                    <td><code><?= htmlspecialchars($r['ccode'], ENT_QUOTES); ?></code></td>
+                    <td><?= htmlspecialchars($r['cname'], ENT_QUOTES); ?> <small class="text-muted">(<?= htmlspecialchars($r['cid'], ENT_QUOTES); ?>)</small></td>
+                    <td><?= htmlspecialchars($r['dzn'] ?: '&mdash;', ENT_QUOTES); ?></td>
+                    <td class="text-center">
+                      <?php if ($r['status']===1): ?><span class="badge badge-success">Active</span>
+                      <?php else: ?><span class="badge badge-secondary">Inactive</span><?php endif; ?>
+                    </td>
+                    <td class="text-center">
+                      <form method="post" action="iu-sites.php" style="display:inline;" onsubmit="return confirm('Toggle BDSIS participation for <?= htmlspecialchars($r['cname'], ENT_QUOTES); ?>?');">
+                        <?= bdsis_csrf_field(); ?>
+                        <input type="hidden" name="do" value="toggle_dsis">
+                        <input type="hidden" name="cid" value="<?= htmlspecialchars($r['cid'], ENT_QUOTES); ?>">
+                        <input type="hidden" name="to" value="<?= $r['dsis'] === 1 ? '0' : '1'; ?>">
+                        <?php if ($r['dsis'] === 1): ?>
+                          <button type="submit" class="btn btn-xs btn-success" title="Currently a BDSIS sentinel site. Click to disable.">Sentinel</button>
+                        <?php else: ?>
+                          <button type="submit" class="btn btn-xs btn-outline-secondary" title="Not participating in BDSIS. Click to enable.">&nbsp;&mdash;&nbsp;</button>
+                        <?php endif; ?>
+                      </form>
+                    </td>
+                  </tr>
+                <?php endforeach; if (count($rows)===0): ?>
+                  <tr><td colspan="5" class="text-center text-muted p-4">No centres visible.</td></tr>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <?php require_once __DIR__ . '/../includes/footer.php'; ?>
+</div>
+<script>
+  $(function(){
+    $('#tblSites').DataTable({ paging: true, lengthChange: false, pageLength: 25, order: [[1,'asc']], columnDefs: [{ orderable:false, targets:[4] }] });
+  });
+</script>
+</body>
+</html>

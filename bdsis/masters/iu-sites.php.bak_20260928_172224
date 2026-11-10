@@ -1,0 +1,123 @@
+<?php
+/**
+ * Save endpoint for masters/sites.php. POST only.
+ *
+ * Cross-app master: ms_health_center_table lives in commondb and is shared
+ * with every sibling RCDC surveillance system. Every write here is gated
+ * to ADMIN via bdsis_masters_require_write('sites') / _require_delete().
+ *
+ * Supported actions:
+ *   toggle_dsis   flip BDSIS participation flag (bdsis) for one centre
+ *   update        rename centre / change dzongkhag / toggle status + dsis
+ *   delete        SOFT-retire only (status=0). Refused when any BDSIS
+ *                 subject_information_table row still names the centre.
+ *                 Hard delete is NEVER offered here (would orphan FKs in
+ *                 every sibling system).
+ *
+ * The primary key (center_id) and the subject-ID prefix (center_code) are
+ * never editable here; renaming either from BDSIS alone would silently
+ * drift the shared master from the sibling apps or split a centre's
+ * historical Subject IDs.
+ */
+require_once __DIR__ . '/_inc.php';
+bdsis_csrf_require();
+
+/* Any write on Sites requires ADMIN (cross-app master). */
+bdsis_masters_require_write('sites', 'write');
+
+if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    mdFlash('danger', 'This action must be submitted from the form.');
+    mdRedirect('sites.php');
+}
+
+$do  = isset($_POST['do'])  ? (string)$_POST['do']  : '';
+$cid = isset($_POST['cid']) ? trim((string)$_POST['cid']) : '';
+if ($cid === '') { mdFlash('danger', 'Centre id is required.'); mdRedirect('sites.php'); }
+
+switch ($do) {
+    case 'toggle_dsis':
+        $to = isset($_POST['to']) ? (string)$_POST['to'] : '';
+        if ($to !== '0' && $to !== '1') { mdFlash('danger', 'Invalid target value.'); mdRedirect('sites.php'); }
+        $newVal = (int)$to;
+        $q = $commondb->prepare("UPDATE ms_health_center_table SET dsis=? WHERE center_id=?");
+        if (!$q) { mdFlash('danger', 'Database error.'); mdRedirect('sites.php'); }
+        $q->bind_param("is", $newVal, $cid);
+        $ok = $q->execute(); $aff = $q->affected_rows; $q->close();
+        if ($ok && $aff > 0) { mdFlash('success', 'BDSIS participation ' . ($newVal ? 'enabled' : 'disabled') . " for centre $cid."); }
+        elseif ($ok)         { mdFlash('info',    "No change: centre $cid was already " . ($newVal ? 'enabled' : 'disabled') . '.'); }
+        else                 { mdFlash('danger',  'Update failed.'); }
+        mdRedirect('sites.php');
+        break;
+
+    case 'update':
+        $cname = isset($_POST['cname']) ? trim((string)$_POST['cname']) : '';
+        $dzc   = isset($_POST['dzc'])   ? trim((string)$_POST['dzc'])   : '';
+        $st    = isset($_POST['status']) ? (string)$_POST['status']     : '1';
+        $dsis  = isset($_POST['dsis'])   ? (string)$_POST['dsis']       : '0';
+        $st    = ($st   === '0') ? 0 : 1;
+        $dsis  = ($dsis === '1') ? 1 : 0;
+
+        if ($cname === '' || mb_strlen($cname) > 120) {
+            mdFlash('danger', 'Centre name is required (up to 120 characters).');
+            mdRedirect('sites.php?edit=' . urlencode($cid) . '#editForm');
+        }
+        if ($dzc === '') {
+            mdFlash('danger', 'Please choose a district.');
+            mdRedirect('sites.php?edit=' . urlencode($cid) . '#editForm');
+        }
+        /* Whitelist the dzongkhag against the master so a hand-crafted POST
+           cannot inject an invalid code. */
+        $chk = $commondb->prepare("SELECT 1 FROM ms_dzongkhag_table WHERE dzongkhag_code=?");
+        $chk->bind_param("s", $dzc); $chk->execute(); $chk->store_result();
+        $dzOk = $chk->num_rows > 0; $chk->close();
+        if (!$dzOk) {
+            mdFlash('danger', 'That district code is not recognised.');
+            mdRedirect('sites.php?edit=' . urlencode($cid) . '#editForm');
+        }
+
+        /* Preserve center_id and center_code -- primary key + subject-ID prefix. */
+        $upd = $commondb->prepare("UPDATE ms_health_center_table
+                                      SET center_name=?, dzongkhag_code=?, status=?, dsis=?
+                                    WHERE center_id=?");
+        if (!$upd) { mdFlash('danger', 'Database error preparing update.'); mdRedirect('sites.php'); }
+        $upd->bind_param("ssiis", $cname, $dzc, $st, $dsis, $cid);
+        $ok = $upd->execute(); $aff = $upd->affected_rows; $upd->close();
+        if ($ok && $aff > 0) { mdFlash('success', "Centre '$cid' updated."); }
+        elseif ($ok)         { mdFlash('info',    "Centre '$cid' saved (no changes to write)."); }
+        else                 { mdFlash('danger',  'Update failed.'); }
+        mdRedirect('sites.php');
+        break;
+
+    case 'delete':
+        /* Delete on cross-app master requires ADMIN (already enforced above,
+           kept explicit for readability) and never hard-deletes. */
+        bdsis_masters_require_delete('sites');
+
+        /* Refuse soft-retire if BDSIS subjects still name the centre. Other
+           sibling apps may still be using it too; a centre with any active
+           FK reference stays live. The scoped check we can perform from
+           BDSIS covers BDSIS's own subject table; cross-app FKs are left
+           to those apps to enforce. */
+        $refBd = mdCountRefs($bdsis, "SELECT COUNT(*) FROM subject_information_table WHERE center_id=?", "s", $cid);
+        if ($refBd > 0) {
+            mdFlash('danger', "Cannot retire '$cid': $refBd BDSIS subject(s) still name this centre. Reassign or archive those subjects first.");
+            mdRedirect('sites.php');
+        }
+
+        /* Soft-retire: status=0 + dsis=0 so it drops out of the BDSIS chooser
+           immediately. center_id and center_code stay, so historical rows in
+           any sibling app that references this centre keep resolving. */
+        $del = $commondb->prepare("UPDATE ms_health_center_table SET status=0, dsis=0 WHERE center_id=? AND status<>0");
+        if (!$del) { mdFlash('danger', 'Database error.'); mdRedirect('sites.php'); }
+        $del->bind_param("s", $cid);
+        $ok = $del->execute(); $aff = $del->affected_rows; $del->close();
+        if ($ok && $aff > 0) { mdFlash('success', "Centre '$cid' retired (status=0). It no longer appears in active pick lists across the platform."); }
+        elseif ($ok)         { mdFlash('warning', "Centre '$cid' was already retired."); }
+        else                 { mdFlash('danger',  'Retire failed.'); }
+        mdRedirect('sites.php');
+        break;
+
+    default:
+        mdFlash('danger', 'Unrecognised action.');
+        mdRedirect('sites.php');
+}

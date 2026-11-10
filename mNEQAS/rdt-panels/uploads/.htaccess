@@ -1,0 +1,9 @@
+# Uploaded evidence images only. Never execute anything from this tree.
+php_flag engine off
+AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .phar .cgi .pl .asp .aspx .jsp .shtml .htaccess
+<FilesMatch "(?i)\.(php[0-9]?|phtml|phar|cgi|pl|asp|aspx|jsp|s?html?|js|htaccess)$">
+    Require all denied
+</FilesMatch>
+<FilesMatch "(?i)\.(jpe?g|png)$">
+    Require all granted
+</FilesMatch>

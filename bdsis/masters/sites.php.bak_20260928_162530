@@ -1,0 +1,278 @@
+<?php require_once __DIR__ . '/_inc.php'; ?>
+<?php
+/* Sites / Health Centers live in commondb.ms_health_center_table and are
+   shared by every sibling RCDC surveillance system. BDSIS lets an Administrator
+   edit the BDSIS-relevant fields (name, dzongkhag, active status, dsis
+   participation) and soft-retire a centre; a hard delete would orphan
+   subject_information_table FKs across every sibling app, so it is not
+   offered. Non-admin roles see the table read-only.
+
+   Editable columns:
+     center_name       display label everywhere
+     dzongkhag_code    district scoping in every system
+     status            0 hides the centre from active pick lists everywhere
+     dsis              BDSIS participation only (this system's chooser + reports)
+
+   NOT editable here (kept in the shared administration portal):
+     center_id         primary key, referenced as FK by every sibling app
+     center_code       subject-id prefix in BDSIS ("<code>-<yy>-<seq>"); a
+                       rename here would silently split a centre's history */
+
+$canWrite  = bdsis_masters_can_write('sites');
+$canDelete = bdsis_masters_can_delete('sites');
+
+/* All dzongkhags for the edit form dropdown. */
+$dzOptions = array();
+$dz = $commondb->query("SELECT dzongkhag_code, dzongkhag_name FROM ms_dzongkhag_table ORDER BY dzongkhag_name");
+if ($dz) { while (list($dc, $dn) = $dz->fetch_row()) { $dzOptions[(string)$dc] = (string)$dn; } $dz->free(); }
+
+/* Edit-mode: ?edit=<center_id>. Only meaningful for admins. */
+$editCid = ($canWrite && isset($_GET['edit'])) ? (string)$_GET['edit'] : '';
+$editRow = null;
+if ($editCid !== '') {
+    $q = $commondb->prepare("SELECT center_id, center_code, center_name, dzongkhag_code, status, dsis
+                               FROM ms_health_center_table WHERE center_id=?");
+    if ($q) {
+        $q->bind_param("s", $editCid); $q->execute();
+        $q->bind_result($ec, $ecode, $ename, $edzc, $est, $edsis);
+        if ($q->fetch()) {
+            $editRow = array('cid'=>(string)$ec,'ccode'=>(string)$ecode,'cname'=>(string)$ename,
+                             'dzc'=>(string)$edzc,'status'=>(int)$est,'dsis'=>(int)$edsis);
+        }
+        $q->close();
+    }
+    if (!$editRow) { $editCid = ''; }
+}
+$isEdit = ($editRow !== null);
+
+$rows = array();
+$sql  = "SELECT h.center_id, h.center_code, h.center_name, h.dzongkhag_code, d.dzongkhag_name, h.status, h.dsis
+           FROM ms_health_center_table h
+           LEFT JOIN ms_dzongkhag_table d ON d.dzongkhag_code = h.dzongkhag_code
+          ORDER BY h.center_name";
+$res = $commondb->query($sql);
+if ($res) {
+    while (list($cid, $ccode, $cname, $dzc, $dzn, $st, $dsis) = $res->fetch_row()) {
+        $rows[] = array(
+            'cid'=>(string)$cid, 'ccode'=>(string)$ccode, 'cname'=>(string)$cname,
+            'dzc'=>(string)$dzc, 'dzn'=>(string)$dzn,
+            'status'=>(int)$st, 'dsis'=>(int)$dsis,
+        );
+    }
+    $res->free();
+}
+
+/* BDSIS-side reference count per centre: how many subjects each site owns.
+   Used to explain why a soft-retire matters and to gate the retire action
+   on cross-app-safe grounds. */
+$bdsisRefs = array();
+foreach ($rows as $r) {
+    $q = $bdsis->prepare("SELECT COUNT(*) FROM subject_information_table WHERE center_id=?");
+    if ($q) {
+        $cid = $r['cid'];
+        $q->bind_param("s", $cid); $q->execute();
+        $q->bind_result($n); $q->fetch(); $q->close();
+        $bdsisRefs[$r['cid']] = (int)$n;
+    }
+}
+?>
+<?php require_once __DIR__ . '/../includes/header.php'; ?>
+<?php require_once __DIR__ . '/../includes/css-jquery.php'; ?>
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+  <?php require_once __DIR__ . '/../includes/top-navbar.php'; ?>
+  <?php require_once __DIR__ . '/../includes/sidebar-menu.php'; ?>
+
+  <div class="content-wrapper">
+    <section class="content-header">
+      <div class="container-fluid">
+        <div class="row mb-2">
+          <div class="col-sm-8">
+            <h1 class="m-0">Sites / Health Centers</h1>
+            <p class="text-muted mb-0" style="font-size:.86rem;">
+              Shared with every RCDC surveillance system &mdash; edits ripple across the platform, so writes are gated to Administrators.
+            </p>
+          </div>
+          <div class="col-sm-4">
+            <ol class="breadcrumb float-sm-right">
+              <li class="breadcrumb-item"><a href="../dashboard/dashboard.php">Dashboard</a></li>
+              <li class="breadcrumb-item"><a href="index.php">Master Data</a></li>
+              <li class="breadcrumb-item active">Sites</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="container-fluid">
+        <?= mdFlashRender(); ?>
+
+        <div class="alert alert-warning" style="font-size:.9rem;">
+          <strong>Cross-app note.</strong> <code>ms_health_center_table</code> is used by
+          every sibling RCDC surveillance system on this server. This screen deliberately
+          <strong>never hard-deletes</strong> a centre &mdash; deletion would orphan
+          <code>subject_information_table</code> FKs in every app. Instead, "Delete"
+          performs a soft-retire (<code>status=0</code>), which drops the centre from all
+          active pick lists across the platform while keeping historical rows intact. A
+          soft-retire is refused while any BDSIS subject still names the centre.
+        </div>
+
+        <div class="row">
+          <div class="col-lg-<?= $canWrite ? '8' : '12'; ?>">
+            <div class="card">
+              <div class="card-header"><h3 class="card-title">All centres</h3></div>
+              <div class="card-body p-0">
+                <table id="tblSites" class="table table-hover table-sm" style="width:100%;">
+                  <thead>
+                    <tr>
+                      <th>Code</th><th>Centre</th><th>District</th>
+                      <th class="text-center">Active</th>
+                      <th class="text-center" style="width:140px;">BDSIS sentinel</th>
+                      <th class="text-right">BDSIS subjects</th>
+                      <?php if ($canWrite || $canDelete): ?>
+                      <th class="text-center" style="width:170px;">Action</th>
+                      <?php endif; ?>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ($rows as $r):
+                      $refs = isset($bdsisRefs[$r['cid']]) ? (int)$bdsisRefs[$r['cid']] : 0; ?>
+                      <tr class="<?= $r['status']===1 ? '' : 'text-muted'; ?>">
+                        <td><code><?= htmlspecialchars($r['ccode'], ENT_QUOTES); ?></code></td>
+                        <td><?= htmlspecialchars($r['cname'], ENT_QUOTES); ?> <small class="text-muted">(<?= htmlspecialchars($r['cid'], ENT_QUOTES); ?>)</small></td>
+                        <td><?= htmlspecialchars($r['dzn'] !== '' ? $r['dzn'] : '—', ENT_QUOTES); ?></td>
+                        <td class="text-center">
+                          <?php if ($r['status']===1): ?><span class="badge badge-success">Active</span>
+                          <?php else: ?><span class="badge badge-secondary">Retired</span><?php endif; ?>
+                        </td>
+                        <td class="text-center">
+                          <?php if ($canWrite): ?>
+                            <form method="post" action="iu-sites.php" style="display:inline;" onsubmit="return confirm('Toggle BDSIS participation for <?= htmlspecialchars($r['cname'], ENT_QUOTES); ?>?');">
+                              <?= bdsis_csrf_field(); ?>
+                              <input type="hidden" name="do" value="toggle_dsis">
+                              <input type="hidden" name="cid" value="<?= htmlspecialchars($r['cid'], ENT_QUOTES); ?>">
+                              <input type="hidden" name="to" value="<?= $r['dsis'] === 1 ? '0' : '1'; ?>">
+                              <?php if ($r['dsis'] === 1): ?>
+                                <button type="submit" class="btn btn-xs btn-success" title="Currently a BDSIS sentinel site. Click to disable.">Sentinel</button>
+                              <?php else: ?>
+                                <button type="submit" class="btn btn-xs btn-outline-secondary" title="Not participating in BDSIS. Click to enable.">&nbsp;&mdash;&nbsp;</button>
+                              <?php endif; ?>
+                            </form>
+                          <?php else: ?>
+                            <?php if ($r['dsis'] === 1): ?><span class="badge badge-success">Sentinel</span>
+                            <?php else: ?><span class="text-muted">&mdash;</span><?php endif; ?>
+                          <?php endif; ?>
+                        </td>
+                        <td class="text-right"><?= $refs; ?></td>
+                        <?php if ($canWrite || $canDelete): ?>
+                        <td class="text-center">
+                          <?php if ($canWrite): ?>
+                            <a href="?edit=<?= urlencode($r['cid']); ?>#editForm" class="btn btn-xs btn-outline-primary">Edit</a>
+                          <?php endif; ?>
+                          <?php if ($canDelete && $r['status'] === 1 && $refs === 0): ?>
+                            <form method="post" action="iu-sites.php" style="display:inline;" onsubmit="return confirm('Soft-retire &quot;<?= htmlspecialchars($r['cname'], ENT_QUOTES); ?>&quot; (status=0)? This hides the centre from ALL sibling systems but keeps historical rows intact. Continue?');">
+                              <?= bdsis_csrf_field(); ?>
+                              <input type="hidden" name="do" value="delete">
+                              <input type="hidden" name="cid" value="<?= htmlspecialchars($r['cid'], ENT_QUOTES); ?>">
+                              <button type="submit" class="btn btn-xs btn-outline-danger">Delete</button>
+                            </form>
+                          <?php elseif ($canDelete && $r['status'] === 1 && $refs > 0): ?>
+                            <span class="text-muted" title="<?= $refs; ?> BDSIS subject(s) still name this centre">In use</span>
+                          <?php endif; ?>
+                        </td>
+                        <?php endif; ?>
+                      </tr>
+                    <?php endforeach; if (count($rows)===0): ?>
+                      <tr><td colspan="<?= ($canWrite || $canDelete) ? 7 : 6; ?>" class="text-center text-muted p-4">No centres visible.</td></tr>
+                    <?php endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <?php if ($canWrite): ?>
+          <div class="col-lg-4">
+            <div class="card <?= $isEdit ? 'card-warning' : 'card-secondary'; ?> card-outline" id="editForm">
+              <div class="card-header">
+                <h3 class="card-title"><?= $isEdit ? 'Edit centre' : 'Edit a centre'; ?></h3>
+              </div>
+              <?php if ($isEdit): ?>
+                <form method="post" action="iu-sites.php" autocomplete="off">
+                  <?= bdsis_csrf_field(); ?>
+                  <input type="hidden" name="do"  value="update">
+                  <input type="hidden" name="cid" value="<?= htmlspecialchars($editRow['cid'], ENT_QUOTES); ?>">
+                  <div class="card-body">
+                    <div class="form-group">
+                      <label class="col-form-label-sm">Centre ID</label>
+                      <input type="text" class="form-control" value="<?= htmlspecialchars($editRow['cid'], ENT_QUOTES); ?>" readonly>
+                      <small class="form-text text-muted">Primary key, cannot be renamed.</small>
+                    </div>
+                    <div class="form-group">
+                      <label class="col-form-label-sm">Centre code</label>
+                      <input type="text" class="form-control" value="<?= htmlspecialchars($editRow['ccode'], ENT_QUOTES); ?>" readonly>
+                      <small class="form-text text-muted">Subject-ID prefix (BDSIS uses <code>&lt;code&gt;-&lt;yy&gt;-&lt;seq&gt;</code>). Renaming here would break historical IDs.</small>
+                    </div>
+                    <div class="form-group">
+                      <label class="col-form-label-sm">Centre name</label>
+                      <input type="text" name="cname" class="form-control" required maxlength="120" value="<?= htmlspecialchars($editRow['cname'], ENT_QUOTES); ?>">
+                    </div>
+                    <div class="form-group">
+                      <label class="col-form-label-sm">District</label>
+                      <select name="dzc" class="form-control" required>
+                        <option value="">Select district</option>
+                        <?php foreach ($dzOptions as $dc => $dn): ?>
+                          <option value="<?= htmlspecialchars($dc, ENT_QUOTES); ?>" <?= (string)$dc === (string)$editRow['dzc'] ? 'selected' : ''; ?>><?= htmlspecialchars($dn, ENT_QUOTES); ?></option>
+                        <?php endforeach; ?>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="col-form-label-sm">Active (across all RCDC apps)</label>
+                      <select name="status" class="form-control">
+                        <option value="1" <?= $editRow['status']===1 ? 'selected' : ''; ?>>Active</option>
+                        <option value="0" <?= $editRow['status']===0 ? 'selected' : ''; ?>>Retired (hidden from every app)</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="col-form-label-sm">BDSIS sentinel (this app only)</label>
+                      <select name="dsis" class="form-control">
+                        <option value="1" <?= $editRow['dsis']===1 ? 'selected' : ''; ?>>Yes &mdash; offered as a BDSIS case-registration site</option>
+                        <option value="0" <?= $editRow['dsis']===0 ? 'selected' : ''; ?>>No</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="card-footer">
+                    <button type="submit" class="btn bg-gradient-warning">Save changes</button>
+                    <a href="sites.php" class="btn btn-secondary">Cancel</a>
+                  </div>
+                </form>
+              <?php else: ?>
+                <div class="card-body">
+                  <p class="text-muted" style="font-size:.9rem;">Click <strong>Edit</strong> on any row to load its values here.</p>
+                </div>
+              <?php endif; ?>
+            </div>
+            <div class="alert alert-info" style="font-size:.86rem;">
+              <strong>Editable fields:</strong> centre name, district, active status,
+              BDSIS-participation flag. <br>
+              <strong>Not editable here:</strong> Centre ID (primary key) and Centre
+              code (subject-ID prefix). Those must be managed through the shared
+              administration portal so every sibling app stays in sync.
+            </div>
+          </div>
+          <?php endif; ?>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <?php require_once __DIR__ . '/../includes/footer.php'; ?>
+</div>
+<script>
+  $(function(){
+    $('#tblSites').DataTable({ paging: true, lengthChange: false, pageLength: 25, order: [[1,'asc']], columnDefs: [{ orderable:false, targets:[<?= ($canWrite || $canDelete) ? 4 : 4; ?>, <?= ($canWrite || $canDelete) ? 6 : 5; ?>] }] });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,686 @@
+<?php
+/* =============================================================================
+   Bacteriology MIC — Phase 1 (per "MIC Document" protocol images).
+   -----------------------------------------------------------------------------
+   Adds a Method selector (Disk Diffusion / MIC) to each Enteric Pathogen row's
+   AST panel. When the user picks MIC, the existing Disk Diffusion antibiotic
+   grid is hidden and this file's panel is shown instead: same 14-antibiotic
+   list, same per-row Interpretation pill, but zone inputs become free-text MIC
+   inputs validated by bdsis_mic_normalize_value() (grammar already used by
+   E. coli AST MIC entries).
+
+   Phase 1 scope — ship this session:
+     * Method dropdown + DD/MIC toggle (lab.php)
+     * MIC panel renderer + hardcoded breakpoints (this file)
+     * iu-lab.php reads method[rowIdx] and routes save
+   Phase 2 — deferred:
+     * Salmonella/Shigella/Enterococcus pathogen-specific antibiotic subsets
+     * β-lactam resistance "new variable after Pathogen 3" MIC columns
+     * Admin seeding of ms_ast_table method='02' rows (replaces hardcoded map)
+
+   Breakpoints match image 2 of the MIC Document. The symbolic values below
+   (e.g. "≤8", "16^", "≥32", "2/38") are what the panel RENDERS as reference
+   hints. For live interpretation we use the numeric 's' / 'r' thresholds
+   extracted alongside them (clean floats), compared against the first numeric
+   substring of whatever the user types.
+
+   Database:
+     Reuses bacteriology_ast_table -- the schema already has `ast_method_id`
+     (VARCHAR) and `zone_diameter` (VARCHAR(10) wide enough for MIC strings
+     like "<=0.5", "0.12-0.5^"). No ALTER needed. `ast_result` holds the
+     interpretation. ast_method_id is '01' for Disk Diffusion rows (unchanged)
+     and '02' for MIC rows added by this file.
+   ============================================================================= */
+
+if (!defined('BDSIS_LAB_BACT_MIC_LOADED')) {
+    define('BDSIS_LAB_BACT_MIC_LOADED', 1);
+}
+
+if (!function_exists('bdsis_bact_mic_breakpoints')) {
+    /**
+     * Antibiotic => breakpoint record. Order is the panel's visual order.
+     *   'agent'  display name
+     *   'mic_s'  Susceptible reference text (as shown on-image)
+     *   'mic_i'  Intermediate reference text ("-" means not defined)
+     *   'mic_r'  Resistant reference text
+     *   's'      numeric Susceptible threshold (float) — "MIC ≤ s" ⇒ S
+     *   'r'      numeric Resistant threshold (float)   — "MIC ≥ r" ⇒ R
+     */
+    function bdsis_bact_mic_breakpoints()
+    {
+        return array(
+            'AMP' => array('agent'=>'Ampicillin',                    'mic_s'=>'≤8',    'mic_i'=>'16^',   'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'CZO' => array('agent'=>'Cefazolin',                     'mic_s'=>'≤2',    'mic_i'=>'4',     'mic_r'=>'≥8',    's'=>2,    'r'=>8),
+            'CRO' => array('agent'=>'Ceftriaxone',                   'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'CTX' => array('agent'=>'Cefotaxime',                    'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'CAZ' => array('agent'=>'Ceftazidime',                   'mic_s'=>'≤4',    'mic_i'=>'8^',    'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'GEN' => array('agent'=>'Gentamicin',                    'mic_s'=>'≤4',    'mic_i'=>'8^',    'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'TCY' => array('agent'=>'Tetracycline',                  'mic_s'=>'≤4',    'mic_i'=>'8',     'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'CIP' => array('agent'=>'Ciprofloxacin',                 'mic_s'=>'≤0.25', 'mic_i'=>'0.5^',  'mic_r'=>'≥1',    's'=>0.25, 'r'=>1),
+            'CHL' => array('agent'=>'Chloramphenicol',               'mic_s'=>'≤8',    'mic_i'=>'16',    'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'NAL' => array('agent'=>'Nalidixic acid',                'mic_s'=>'≤8',    'mic_i'=>'-',     'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'SXT' => array('agent'=>'Trimethoprim-sulfamethoxazole', 'mic_s'=>'≤2/38', 'mic_i'=>'-',     'mic_r'=>'≥4/76', 's'=>2,    'r'=>4),
+            'ETP' => array('agent'=>'Ertapenem',                     'mic_s'=>'≤0.5',  'mic_i'=>'1^',    'mic_r'=>'≥2',    's'=>0.5,  'r'=>2),
+            'IPM' => array('agent'=>'Imipenem',                      'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'MEM' => array('agent'=>'Meropenem',                     'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+        );
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_interpret')) {
+    /**
+     * MIC value → interpretation string ('Susceptible'/'Intermediate'/'Resistant').
+     *
+     * Takes the first numeric substring from the user's input (so "<=0.5"
+     * reads as 0.5, "16^" as 16, ">64" as 64), then compares against the
+     * numeric Susceptible / Resistant thresholds from the breakpoint record:
+     *   value ≤ s  → Susceptible
+     *   value ≥ r  → Resistant
+     *   otherwise  → Intermediate
+     * Returns '' (blank) when the antibiotic code is not in the breakpoint
+     * map or the value cannot be parsed to a positive number.
+     *
+     * @return string
+     */
+    function bdsis_bact_mic_interpret($code, $value)
+    {
+        $code = strtoupper(trim((string)$code));
+        $bps  = bdsis_bact_mic_breakpoints();
+        if (!isset($bps[$code])) { return ''; }
+        $v = trim((string)$value);
+        if ($v === '') { return ''; }
+        if (!preg_match('~\d+(\.\d+)?~', $v, $m)) { return ''; }
+        $num = (float)$m[0];
+        if ($num <= 0) { return ''; }
+        $sThr = isset($bps[$code]['s']) ? (float)$bps[$code]['s'] : null;
+        $rThr = isset($bps[$code]['r']) ? (float)$bps[$code]['r'] : null;
+        if ($sThr !== null && $num <= $sThr) { return 'Susceptible'; }
+        if ($rThr !== null && $num >= $rThr) { return 'Resistant'; }
+        return 'Intermediate';
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_table_exists')) {
+    /**
+     * Positive-only memoised probe: true iff bacteriology_mic_table is on
+     * this database. A FALSE result is NOT cached so that the next call --
+     * after bdsis_bact_mic_table_ensure() may have created the table in
+     * the same request -- sees the up-to-date state.
+     */
+    function bdsis_bact_mic_table_exists($bdsis)
+    {
+        static $exists = null;
+        if ($exists === true) { return true; }    // only cache positive
+        if (!($bdsis instanceof mysqli)) { return false; }
+        $q = @$bdsis->query("SHOW TABLES LIKE 'bacteriology_mic_table'");
+        $has = ($q && $q->num_rows > 0);
+        if ($q) { $q->free(); }
+        if ($has) { $exists = true; }
+        return $has;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_table_ensure')) {
+    /**
+     * Idempotent: creates bacteriology_mic_table if missing. Returns true
+     * when the table is ready to accept writes, false when creation failed
+     * (e.g. the DB account doesn't hold CREATE). The save path calls this
+     * on every MIC save so a fresh install, or an environment where the
+     * manual migration SQL was never applied, auto-heals on first use
+     * instead of silently losing the user's data.
+     *
+     * Schema matches db-migrations/2026-10-03-bact-mic-table.sql byte-for-byte
+     * so applying the migration manually after this ran is a no-op.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_table_ensure($bdsis)
+    {
+        if (bdsis_bact_mic_table_exists($bdsis)) { return true; }
+        if (!($bdsis instanceof mysqli)) { return false; }
+        $sql = "CREATE TABLE IF NOT EXISTS bacteriology_mic_table (\n"
+             . "  id                 INT(11)      NOT NULL AUTO_INCREMENT,\n"
+             . "  brt2_id            INT(11)      NOT NULL,\n"
+             . "  antimicrobial_code VARCHAR(15)  NOT NULL,\n"
+             . "  mic_value          VARCHAR(20)  NULL,\n"
+             . "  ast_result         VARCHAR(30)  NULL,\n"
+             . "  recorded_on        DATETIME     NULL,\n"
+             . "  PRIMARY KEY (id),\n"
+             . "  KEY idx_brt2 (brt2_id),\n"
+             . "  KEY idx_brt2_code (brt2_id, antimicrobial_code)\n"
+             . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+        $ok = @$bdsis->query($sql);
+        if (!$ok) { return false; }
+        /* The positive-only memo in _table_exists re-probes on the next call,
+           which will now hit the newly created table and flip the cache. */
+        return bdsis_bact_mic_table_exists($bdsis);
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_load_saved')) {
+    /**
+     * Saved MIC readings for one isolate -- now from the dedicated
+     * bacteriology_mic_table (added 2026-10-03). The earlier Phase 1 attempt
+     * stored MIC rows in bacteriology_ast_table.zone_diameter, which is a
+     * DECIMAL column in the Bacteriology schema and could not accept strings
+     * like "<=0.5". The MIC flow now has its own VARCHAR-friendly table.
+     *
+     * Returns map code => array('value','result'). Empty when the migration
+     * hasn't been run or nothing is stored.
+     *
+     * @return array
+     */
+    function bdsis_bact_mic_load_saved($bdsis, $brt2id)
+    {
+        $out = array();
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return $out; }
+        if (!bdsis_bact_mic_table_exists($bdsis)) { return $out; }
+        $q = @$bdsis->query("SELECT antimicrobial_code, mic_value, ast_result
+                               FROM bacteriology_mic_table
+                              WHERE brt2_id=".$brt2id);
+        if ($q) {
+            while (list($c, $z, $r) = $q->fetch_row()) {
+                $out[strtoupper((string)$c)] = array(
+                    'value'  => ($z === null ? '' : (string)$z),
+                    'result' => (string)$r,
+                );
+            }
+            $q->free();
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_panel_html')) {
+    /**
+     * The MIC AST sub-panel for one pathogen row. Sibling of #bpDd{idx};
+     * lab.php toggles between them via bpSetAstMethod().
+     *
+     * @param  string $idx    row index (matches the DD panel)
+     * @param  array  $saved  code => array('value','result'); empty for new rows
+     * @param  bool   $show   initial visibility (true when method='02')
+     * @return string
+     */
+    function bdsis_bact_mic_panel_html($idx, $saved = array(), $show = false)
+    {
+        $hv  = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $bps = bdsis_bact_mic_breakpoints();
+
+        $h  = '<div class="lr-bact-mic" id="bpMic'.$idx.'" style="display:'.($show ? 'block' : 'none').';">';
+        $h .= '<div class="lr-subcard lr-subcard--ast lr-subcard--mic">';
+        $h .= '<div class="lr-subcard__head"><h4 class="lr-subcard__title">Antimicrobial Susceptibility &mdash; MIC</h4>'
+            . '<span class="lr-subcard__meta">Minimum Inhibitory Concentration (mg/L) &middot; interpreted as you type</span></div>';
+        /* Column layout aligned with the Disk Diffusion grid (2026-10-07):
+             Antibiotic | Method | MIC (mg/L) | Interpretation
+           The per-row Method column shows the fixed "MIC" chip, mirroring
+           the "Disk Diffusion" chip on the DD side. The S/I/R reference
+           values stay as a per-input tooltip (hover the MIC field) so they
+           remain discoverable without taking a column of their own. */
+        $h .= '<div class="row lr-grid-head d-none d-md-flex">'
+            . '<div class="col-md-3">Antibiotic</div>'
+            . '<div class="col-md-3">Method</div>'
+            . '<div class="col-md-2">MIC (mg/L)</div>'
+            . '<div class="col-md-4">Interpretation</div></div>';
+
+        $j = 0;
+        foreach ($bps as $code => $bp) {
+            $cur    = isset($saved[$code]) ? $saved[$code] : array('value'=>'', 'result'=>'');
+            $vId    = 'bpMicVal'.$idx.'_'.$code;
+            $rId    = 'bpMicRes'.$idx.'_'.$code;
+            $hintS  = $bp['mic_s'];
+            $hintI  = $bp['mic_i'];
+            $hintR  = $bp['mic_r'];
+
+            $h .= '<div class="row lr-line bp-mic-row">';
+            /* Antibiotic + hidden code (code[idx][j] is reused per DD; MIC
+               posts its own `mic_value[idx][code]` keyed by antibiotic code
+               so DD and MIC never share input names. */
+            $h .= '<div class="col-md-3 lr-cell lr-cell--name"><span class="lr-agent">'.$hv($bp['agent']).'</span>'
+                . '<span class="lr-agent-sub">'.$hv($code).'</span></div>';
+            /* Method chip, mirroring the DD "Disk Diffusion" chip. */
+            $h .= '<div class="col-md-3 lr-cell d-none d-md-block"><span class="lr-chip">MIC</span></div>';
+            /* MIC value input (2026-10-07 UI alignment): type="number" numeric
+               stepper with up/down arrows, matching the Zone (mm) field on the
+               Disk Diffusion grid. The S/I/R reference values live on the
+               title tooltip (hover) so lab techs still see what their value is
+               being read against. Interpretation (bpBactMicInterpret) uses the
+               first numeric substring of the value, which works identically
+               for a numeric-input value as it did for a text value. */
+            $bpHint = 'S '.$hintS.' · I '.$hintI.' · R '.$hintR;
+            $h .= '<div class="col-6 col-md-2 lr-cell"><label class="lr-cell-label" for="'.$vId.'">MIC (mg/L)<span class="sr-only">, '.$hv($bp['agent']).'</span>:</label>'
+                . '<input type="number" step="any" min="0" name="mic_value['.$idx.']['.$code.']" id="'.$vId.'"'
+                . ' class="form-control text-center bp-mic-value" data-code="'.$hv($code).'"'
+                . ' data-s="'.$hv((string)$bp['s']).'" data-r="'.$hv((string)$bp['r']).'"'
+                . ' value="'.$hv($cur['value']).'" autocomplete="off"'
+                . ' title="Breakpoints: '.$hv($bpHint).'"'
+                . ' oninput="bpBactMicInterpret(this);" /></div>';
+            /* Interpretation pill */
+            $h .= '<div class="col-6 col-md-4 lr-cell"><label class="lr-cell-label" for="'.$rId.'">Result<span class="sr-only">, '.$hv($bp['agent']).'</span>:</label>'
+                . '<input type="text" name="mic_result['.$idx.']['.$code.']" id="'.$rId.'"'
+                . ' value="'.$hv($cur['result']).'" class="form-control lr-pill bp-mic-result"'
+                . ' readonly tabindex="-1" aria-label="MIC result, '.$hv($bp['agent']).'" /></div>';
+            $h .= '</div>';
+            $j++;
+        }
+
+        $h .= '<div class="lr-help"><i class="fas fa-info-circle" aria-hidden="true"></i><span>'
+            . 'Enter the MIC value in mg/L as a number (e.g. <code>0.5</code>, <code>2</code>, <code>16</code>). '
+            . 'Use the up / down arrows or type directly; the interpretation updates automatically from the per-antibiotic breakpoints (hover the input to see S / I / R). '
+            . 'Leave a row blank if the antibiotic was not tested &mdash; the save path writes nothing for empty rows.'
+            . '</span></div>';
+        $h .= '</div></div>';
+        return $h;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_parse_post')) {
+    /**
+     * Pull one row's MIC fields from $_POST and return normalised rows ready
+     * for save. Each entry: code => array('value','result'). Rows with empty
+     * value are returned so the save path can DELETE them (replace semantics).
+     *
+     * @return array
+     */
+    function bdsis_bact_mic_parse_post($rowIdx, $post)
+    {
+        $out    = array();
+        $values = (isset($post['mic_value'][$rowIdx]) && is_array($post['mic_value'][$rowIdx])) ? $post['mic_value'][$rowIdx] : array();
+        foreach (bdsis_bact_mic_breakpoints() as $code => $_bp) {
+            $raw = isset($values[$code]) ? trim((string)$values[$code]) : '';
+            if ($raw === '') { $out[$code] = array('value'=>'', 'result'=>''); continue; }
+            /* Server-side normalisation (reuses the E. coli MIC grammar). */
+            $norm = function_exists('bdsis_mic_normalize_value') ? bdsis_mic_normalize_value($raw) : $raw;
+            if ($norm === null) {
+                /* Invalid grammar -> treat as empty rather than storing junk. */
+                $out[$code] = array('value'=>'', 'result'=>''); continue;
+            }
+            $out[$code] = array(
+                'value'  => (string)$norm,
+                'result' => bdsis_bact_mic_interpret($code, $norm),
+            );
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_save')) {
+    /**
+     * Replace-semantics write for one isolate's MIC readings into the
+     * dedicated bacteriology_mic_table (VARCHAR mic_value column accepts
+     * comparator-prefixed strings cleanly). Deletes any prior rows for the
+     * brt2_id, then INSERTs one row per non-empty antibiotic.
+     *
+     * When the migration hasn't been applied yet, returns TRUE (no-op) so a
+     * save POST still succeeds for other data on the form -- just no MIC rows
+     * are persisted. The admin runs the SQL once and the save starts working.
+     *
+     * ALSO deletes any method='02' rows the earlier (broken) Phase 1 code
+     * accidentally attempted to write into bacteriology_ast_table, so a
+     * record that was stuck in that state cleans itself on the next save.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_save($bdsis, $brt2id, $rows)
+    {
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+
+        /* Clean up any stale ast_method_id='02' rows the earlier Phase 1 code
+           may have left in bacteriology_ast_table before this bug-fix shipped
+           (they'd be numeric-only, since the DECIMAL column rejected MIC
+           strings). Safe to run unconditionally. */
+        $delLegacy = @$bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND ast_method_id='02'");
+        if ($delLegacy) {
+            $delLegacy->bind_param("i", $brt2id);
+            $delLegacy->execute();
+            $delLegacy->close();
+        }
+
+        /* FAIL LOUDLY if the dedicated MIC table is missing AND we cannot
+           create it. The earlier design silently succeeded in this case,
+           which meant a user's MIC save vanished without any error -- the
+           exact failure mode behind the "Method reverts to Disk Diffusion
+           on reload" bug. The ensure call runs an idempotent
+           CREATE TABLE IF NOT EXISTS so a fresh install just works. */
+        if (!bdsis_bact_mic_table_ensure($bdsis)) { return false; }
+
+        $del = @$bdsis->prepare("DELETE FROM bacteriology_mic_table WHERE brt2_id=?");
+        if (!$del) { return false; }
+        $del->bind_param("i", $brt2id);
+        $del->execute();
+        $del->close();
+
+        if (!is_array($rows) || count($rows) === 0) { return true; }
+
+        $ins = @$bdsis->prepare("INSERT INTO bacteriology_mic_table
+                                 (brt2_id, antimicrobial_code, mic_value, ast_result, recorded_on)
+                                 VALUES (?, ?, ?, ?, NOW())");
+        if (!$ins) { return false; }
+        foreach ($rows as $code => $row) {
+            $v = isset($row['value']) ? (string)$row['value'] : '';
+            if ($v === '') { continue; }   // empty rows are not persisted (user didn't test that antibiotic)
+            $c = strtoupper((string)$code);
+            $r = isset($row['result']) ? (string)$row['result'] : '';
+            $ins->bind_param("isss", $brt2id, $c, $v, $r);
+            if (!$ins->execute()) { $ins->close(); return false; }
+        }
+        $ins->close();
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_delete_dd')) {
+    /**
+     * When the user switches a row FROM Disk Diffusion TO MIC on an edit,
+     * iu-lab.php calls this so stale DD rows for the isolate are cleared.
+     * Only DD rows (ast_method_id='01') are removed; AmpC/ESBL/CPE tables
+     * live elsewhere and are not touched.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_delete_dd($bdsis, $brt2id)
+    {
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+        $q = @$bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND ast_method_id='01'");
+        if (!$q) { return false; }
+        $q->bind_param("i", $brt2id);
+        $ok = $q->execute();
+        $q->close();
+        return (bool)$ok;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_delete')) {
+    /**
+     * When the user switches a row FROM MIC TO Disk Diffusion on an edit,
+     * iu-lab.php calls this to clear the MIC-side storage. No-op when the
+     * dedicated table isn't present yet.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_delete($bdsis, $brt2id)
+    {
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+        /* Always try to clean any stray ast_method_id='02' rows from the
+           earlier (broken) attempt; harmless when none exist. */
+        $delLegacy = @$bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND ast_method_id='02'");
+        if ($delLegacy) { $delLegacy->bind_param("i", $brt2id); $delLegacy->execute(); $delLegacy->close(); }
+        if (!bdsis_bact_mic_table_exists($bdsis)) { return true; }
+        $q = @$bdsis->prepare("DELETE FROM bacteriology_mic_table WHERE brt2_id=?");
+        if (!$q) { return false; }
+        $q->bind_param("i", $brt2id);
+        $ok = $q->execute();
+        $q->close();
+        return (bool)$ok;
+    }
+}
+
+/* =============================================================================
+   Phase 3 — MIC-triggered ESBL / CPE / AmpC confirmatory flow
+   -----------------------------------------------------------------------------
+   The confirmatory tests (ESBL combination disk, mCIM/eCIM, AmpC) are physical
+   disk tests performed AFTER a resistant-phenotype screen suggests the organism
+   needs confirming. On the DD path that screen is the routine antibiogram's
+   zone diameters; on the MIC path it is the Phase 3 phenotype thresholds from
+   image 3 of the MIC Document:
+
+     ESBL screen:   CTX > 1  OR  CRO > 1  OR  CAZ > 4
+     AmpC screen:   CTX > 1 AND CRO > 1              (bdsis_ampc_is_triggered,
+                                                     requires all three)
+                    confirmed with cefoxitin FOX > 8
+     CPE screen:    ETP > 0.5  OR  IPM > 1  OR  MEM > 1
+
+   These helpers project a parsed MIC row set into the code => interpretation
+   shape bdsis_resistance_plan_core() and bdsis_ampc_is_triggered() already
+   consume for the DD path, so Phase 3 reuses the entire confirmatory
+   validation / save / load pipeline unchanged. The underlying confirmatory
+   inputs stay as mm readings (the clavulanic-acid combination disc, cefoxitin
+   disc and mCIM/eCIM disc are physical tests regardless of what triggered
+   them) -- only the screen that opens the panel differs. The DD path is
+   byte-identical to before.
+   ============================================================================= */
+
+if (!function_exists('bdsis_bact_mic_phenotype_thresholds')) {
+    /**
+     * Phase 3 phenotype trigger thresholds (user spec 2026-10-04).
+     * "MIC value > threshold" is considered Resistant for screening.
+     * These are not the general S/I/R breakpoints (those live in
+     * bdsis_bact_mic_breakpoints()) -- they are the specific confirmatory-
+     * flow screens, split per confirmatory panel so each has its own
+     * trigger vocabulary and the ESBL panel does NOT fire on CRO alone.
+     *
+     * ESBL panel:   CTX > 1  OR  CAZ > 4             (CRO deliberately excluded)
+     * CPE  panel:   ETP > 0.5  OR  IPM > 1  OR  MEM > 1
+     * AmpC panel:   CTX > 1 AND CRO > 1               (2026-10-08: CAZ dropped)
+     *               and FOX > 8 for cefoxitin confirmation
+     *
+     * @param  string $section  'esbl' | 'cpe' | 'ampc'  (default 'esbl')
+     * @return array            code => float threshold
+     */
+    function bdsis_bact_mic_phenotype_thresholds($section = 'esbl')
+    {
+        $section = strtolower((string)$section);
+        if ($section === 'cpe') {
+            return array('ETP' => 0.5, 'IPM' => 1, 'MEM' => 1);
+        }
+        if ($section === 'ampc') {
+            /* 2026-10-08 spec: CAZ removed from the AmpC co-trigger. The
+               panel now opens on CTX AND CRO alone; FOX stays as the
+               cefoxitin screen for in-panel interpretation. */
+            return array('CTX' => 1, 'CRO' => 1, 'FOX' => 8);
+        }
+        /* ESBL (2026-10-05 spec): CTX > 1 OR CAZ > 4 OR CRO > 1. CRO added so
+           MIC isolates where only Ceftriaxone is elevated also fire ESBL. */
+        return array('CTX' => 1, 'CAZ' => 4, 'CRO' => 1);
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_carbapenem_trigger_code')) {
+    /**
+     * Translate a carbapenem's MIC-panel code into the code the trigger
+     * lists and the DD panel use.
+     *
+     * The two halves of the module grew up with different abbreviations
+     * for the same three drugs:
+     *
+     *   MIC side  (bdsis_bact_mic_breakpoints, bacteriology_mic_table,
+     *              bdsis_bact_mic_phenotype_thresholds, MIC_PHENOTYPE)
+     *              -> ETP / IPM / MEM
+     *   DD side   (bdsis_bact_trigger_codes, the DD antibiogram, the
+     *              Module A screening rows, cpe_trigger_agents as stored)
+     *              -> EPT / IMI / MER
+     *
+     * Nothing translated between them, so for a MIC isolate the proxy
+     * results came out keyed ETP/IPM/MEM while bdsis_resistance_plan_core
+     * looked for IMI/EPT/MER -- zero overlap. $cpeBy came back empty, the
+     * CPE block was skipped, and the whole Carbapenemase Detection save
+     * (Module A values, mCIM, eCIM, carbapenemase_result) was discarded
+     * on every MIC save. Module A's client-side prefill and mirror-back
+     * missed for the same reason -- see CARBA_SCREEN_MIC_SOURCES in
+     * lab.php.
+     *
+     * The DD spelling is canonical: it is what the trigger lists use and
+     * what already sits in cpe_trigger_agents on stored rows, so MIC is
+     * normalised towards it rather than the other way round. Any code
+     * that is not one of the three carbapenems passes through unchanged,
+     * which leaves the ESBL / AmpC codes (CTX, CAZ, CRO, FOX -- spelled
+     * identically on both sides) untouched.
+     *
+     * @param  string $code  antimicrobial code in either spelling
+     * @return string        the trigger-list spelling
+     */
+    function bdsis_bact_mic_carbapenem_trigger_code($code)
+    {
+        static $map = array('ETP' => 'EPT', 'IPM' => 'IMI', 'MEM' => 'MER');
+        $c = strtoupper(trim((string)$code));
+        return isset($map[$c]) ? $map[$c] : $c;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_proxy_results')) {
+    /**
+     * Project MIC rows into code => 'Resistant' | 'Susceptible' using the
+     * ESBL + CPE phenotype thresholds combined. This is what the shared
+     * resistance plan core (bdsis_resistance_plan_core) consumes to decide
+     * which confirmatory sections are triggered.
+     *
+     * Deliberately EXCLUDES CRO even though CRO is on the DD ESBL trigger
+     * list (CAZ/CTX/CPD/CRO) -- the user spec for MIC-mode ESBL triggers
+     * on CTX > 1 OR CAZ > 4 only. CRO is handled separately for AmpC
+     * co-triggering via bdsis_bact_mic_proxy_results_ampc().
+     *
+     * Rows with no value, or whose value does not parse as a positive
+     * number, are skipped (no entry in the returned map).
+     *
+     * @param  array $micRows  shape returned by bdsis_bact_mic_parse_post()
+     * @return array           code => 'Resistant' | 'Susceptible'
+     */
+    function bdsis_bact_mic_proxy_results($micRows)
+    {
+        $out = array();
+        if (!is_array($micRows)) { return $out; }
+        $thr = array_merge(
+            bdsis_bact_mic_phenotype_thresholds('esbl'),   // CTX, CAZ
+            bdsis_bact_mic_phenotype_thresholds('cpe')     // ETP, IPM, MEM
+        );
+        foreach ($thr as $code => $limit) {
+            if (!isset($micRows[$code]) || !is_array($micRows[$code])) { continue; }
+            $v = isset($micRows[$code]['value']) ? trim((string)$micRows[$code]['value']) : '';
+            if ($v === '') { continue; }
+            if (!preg_match('~\d+(\.\d+)?~', $v, $m)) { continue; }
+            $num = (float)$m[0];
+            /* 2026-10-14: key the result by the TRIGGER-list spelling, not
+               the MIC panel's. $micRows is still READ with the MIC code
+               above (that is how the panel and bacteriology_mic_table name
+               it); only the output key is normalised, so a caller comparing
+               against bdsis_bact_trigger_codes() actually finds its codes. */
+            $outCode = bdsis_bact_mic_carbapenem_trigger_code($code);
+            $out[$outCode] = ($num > $limit) ? 'Resistant' : 'Susceptible';
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_proxy_results_ampc')) {
+    /**
+     * AmpC-specific projection. The AmpC trigger wants CTX AND CRO both
+     * 'Resistant' (bdsis_ampc_is_triggered, 2026-10-08 spec; CAZ was
+     * dropped), so CRO must be present in the map even though it does
+     * not trigger ESBL on its own.
+     *
+     * @return array  code => 'Resistant' | 'Susceptible'
+     */
+    function bdsis_bact_mic_proxy_results_ampc($micRows)
+    {
+        $out = array();
+        if (!is_array($micRows)) { return $out; }
+        $thr = bdsis_bact_mic_phenotype_thresholds('ampc');  // CTX, CRO, FOX
+        foreach ($thr as $code => $limit) {
+            if (!isset($micRows[$code]) || !is_array($micRows[$code])) { continue; }
+            $v = isset($micRows[$code]['value']) ? trim((string)$micRows[$code]['value']) : '';
+            if ($v === '') { continue; }
+            if (!preg_match('~\d+(\.\d+)?~', $v, $m)) { continue; }
+            $num = (float)$m[0];
+            $out[$code] = ($num > $limit) ? 'Resistant' : 'Susceptible';
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_resistance_plan')) {
+    /**
+     * MIC-mode counterpart of bdsis_bact_resistance_plan(): validates and
+     * interprets one pathogen row's confirmatory tests when the AST method
+     * is MIC. Section-aware: only the sections the user has actually
+     * engaged with are validated. A section the user has NOT touched is
+     * silently skipped even when the MIC values would trip its screen --
+     * the panel appears informationally (see bpMicResistanceSync in
+     * lab.php) but the save is never refused for an untouched section.
+     *
+     *   ESBL section:   validated iff any esbl_method / esbl_zone / esbl_result
+     *                   field for this row carries a non-empty value.
+     *   CPE  section:   validated iff any cpe_agent / mcim_* / ecim_* /
+     *                   cpe_interp field carries a non-empty value.
+     *
+     * Core itself is unchanged -- we just mute the trigger results for a
+     * section the user hasn't engaged with (R -> Susceptible for that code),
+     * which makes core treat the section as "not triggered" and bypass its
+     * completeness checks for that section.
+     *
+     * @param  mysqli $bdsis
+     * @param  mixed  $rowIdx   form row index (pathogen[i])
+     * @param  string $label    row label for messages, e.g. "Enteric Pathogen 2"
+     * @param  array  $micRows  bdsis_bact_mic_parse_post() output
+     * @param  array  $post     the whole request array
+     * @return array            'ok', 'error', 'esbl', 'cpe'
+     */
+    function bdsis_bact_mic_resistance_plan($bdsis, $rowIdx, $label, $micRows, $post)
+    {
+        $results = bdsis_bact_mic_proxy_results($micRows);
+        $field = function ($name, $sub = null) use ($post, $rowIdx) {
+            if (!isset($post[$name]) || !is_array($post[$name]) || !isset($post[$name][$rowIdx])) { return ''; }
+            $v = $post[$name][$rowIdx];
+            if ($sub !== null) { $v = (is_array($v) && isset($v[$sub])) ? $v[$sub] : ''; }
+            return is_array($v) ? '' : trim((string)$v);
+        };
+
+        /* Section-engagement check -- was any ESBL field touched for this row? */
+        $esblAnyEntered = false;
+        if (function_exists('bdsis_esbl_agents')) {
+            foreach (bdsis_esbl_agents($bdsis) as $code => $_ag) {
+                if ($field('esbl_method', $code) !== '' || $field('esbl_zone', $code) !== '') {
+                    $esblAnyEntered = true;
+                    break;
+                }
+            }
+        }
+        if (!$esblAnyEntered && $field('esbl_result') !== '') { $esblAnyEntered = true; }
+
+        /* And any CPE field? "CPE" here spans the whole Carbapenemase slot:
+           the mCIM/eCIM Carbapenemase Detection flow AND the standalone Carba
+           NP test. Both the user-visible panels live inside #bpConf and both
+           persist to bacteriology_resistance_table, so a MIC save that
+           carries Carba NP tubes alone must keep the CPE triggers live --
+           otherwise bdsis_resistance_plan_core skips its CPE block and the
+           Carba NP data is silently dropped. 2026-10-10: carba_np_tube_a /
+           carba_np_tube_b were added to the engagement list for parity with
+           the DD save path, which validates them inside the same CPE block. */
+        $cpeAnyEntered = false;
+        foreach (array('cpe_agent','mcim_method','mcim_zone','mcim_colonies','ecim_method','ecim_zone','cpe_interp','carba_np_tube_a','carba_np_tube_b') as $f) {
+            if ($field($f) !== '') { $cpeAnyEntered = true; break; }
+        }
+
+        /* Mute triggers for sections the user hasn't engaged with so core
+           treats them as "not triggered" and skips its completeness checks.
+           A section the user HAS engaged with is validated fully -- partial
+           ESBL data still fails with the specific "enter a valid zone..."
+           message the DD path uses, which is what we want. */
+        if (function_exists('bdsis_bact_trigger_codes')) {
+            $trig = bdsis_bact_trigger_codes();
+            if (!$esblAnyEntered) {
+                foreach ((array)$trig['esbl'] as $c) {
+                    if (isset($results[$c]) && $results[$c] === 'Resistant') {
+                        $results[$c] = 'Susceptible';
+                    }
+                }
+            }
+            if (!$cpeAnyEntered) {
+                foreach ((array)$trig['cpe'] as $c) {
+                    if (isset($results[$c]) && ($results[$c] === 'Resistant' || $results[$c] === 'Intermediate')) {
+                        $results[$c] = 'Susceptible';
+                    }
+                }
+            }
+        }
+
+        if (!function_exists('bdsis_resistance_plan_core')) {
+            /* lab-helpers.php not loaded in this request -- treat as "no plan"
+               so the MIC primary save still goes through. */
+            return array('ok' => true, 'error' => '', 'esbl' => null, 'cpe' => null);
+        }
+        return bdsis_resistance_plan_core($bdsis, $results, $label, $field);
+    }
+}

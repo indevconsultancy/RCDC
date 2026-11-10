@@ -1,0 +1,700 @@
+/* ============================================================
+   MPQMS professional theme (ported from NTESIS)
+   Palette: teal (brand) + slate neutrals
+   Loaded after adminlte.min.css from includes/css-jquery.php
+   ============================================================ */
+:root {
+  --nt-primary: #007bff;
+  --nt-primary-dark: #0056b3;
+  --nt-primary-light: #d6e9ff;
+  --nt-sky: #17a2b8;
+  --nt-sky-dark: #117a8b;
+  --nt-amber: #fd7e14;
+  --nt-red: #dc3545;
+  --nt-green: #28a745;
+  --nt-violet: #6f42c1;
+  --nt-slate-50: #f8fafc;
+  --nt-slate-100: #f1f5f9;
+  --nt-slate-200: #e2e8f0;
+  --nt-slate-300: #cbd5e1;
+  --nt-slate-400: #94a3b8;
+  --nt-slate-500: #64748b;
+  --nt-slate-600: #475569;
+  --nt-slate-700: #334155;
+  --nt-slate-800: #1e293b;
+  --nt-slate-900: #0f172a;
+  --nt-shadow: 0 1px 3px rgba(15, 23, 42, .08), 0 1px 2px rgba(15, 23, 42, .04);
+  --nt-shadow-md: 0 4px 12px rgba(15, 23, 42, .10);
+  --nt-radius: 10px;
+}
+
+/* ---------- Base ---------- */
+body {
+  font-family: 'Source Sans Pro', -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--nt-slate-700);
+}
+.content-wrapper { background: var(--nt-slate-100); }
+.content-header h1 { font-weight: 700; color: var(--nt-slate-800); font-size: 1.6rem; }
+.breadcrumb { background: transparent; font-size: .85rem; }
+.breadcrumb-item a { color: var(--nt-primary); }
+a { color: var(--nt-primary); }
+a:hover { color: var(--nt-primary-dark); }
+
+/* ---------- Top navbar ---------- */
+.main-header.navbar {
+  background: #fff !important;
+  border-bottom: 1px solid var(--nt-slate-200);
+  box-shadow: var(--nt-shadow);
+  min-height: 56px;
+}
+.main-header .nav-link { color: var(--nt-slate-600) !important; }
+.main-header .nav-link:hover { color: var(--nt-primary) !important; }
+.nt-user-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 14px 4px 6px; margin: 4px 8px;
+  background: var(--nt-slate-100); border-radius: 999px;
+  font-size: .85rem; color: var(--nt-slate-700);
+}
+.nt-user-chip .nt-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--nt-primary); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .8rem; text-transform: uppercase;
+}
+.nt-user-chip .nt-role {
+  font-size: .7rem; color: var(--nt-primary-dark);
+  background: var(--nt-primary-light); border-radius: 999px; padding: 1px 8px;
+  font-weight: 600; white-space: nowrap;
+}
+
+/* ---------- Sidebar ---------- */
+.main-sidebar, .main-sidebar::before {
+  background: linear-gradient(180deg, var(--nt-slate-900) 0%, var(--nt-slate-800) 100%) !important;
+}
+/* Sidebar brand — Oct-2026: the full subtitle "Medicinal Products Quality
+   Monitoring System" is 45 characters, so the AdminLTE defaults
+   (white-space:nowrap + overflow:hidden + text-overflow:ellipsis) would
+   clip it. These rules let the brand container auto-grow in height, wrap
+   the subtitle onto up to three lines, and scale the type slightly so the
+   phrase stays visually balanced with the circular logo image. */
+.brand-link {
+  border-bottom: 1px solid rgba(255,255,255,.08) !important;
+  padding: .7rem .8rem !important;
+  height: auto !important; min-height: 57px;
+  display: flex !important; align-items: center !important; gap: 10px;
+  white-space: normal !important;
+}
+.brand-link .brand-image {
+  flex: 0 0 auto; max-height: 36px; margin: 0 !important; opacity: .9;
+}
+.brand-link .brand-text {
+  flex: 1 1 auto;
+  font-weight: 700 !important; letter-spacing: 1.2px; color: #fff;
+  font-size: 1.05rem !important; line-height: 1.15;
+  display: block;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: initial !important;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.brand-link .nt-brand-sub {
+  display: block; margin-top: 2px;
+  font-size: .62rem; color: var(--nt-slate-400);
+  letter-spacing: .3px; font-weight: 400;
+  line-height: 1.25;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: initial !important;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+/* AdminLTE collapses the sidebar on mini mode; hide the longer subtitle so
+   only "MPQMS" remains visible when the sidebar is in the icon-only state. */
+.sidebar-collapse .main-sidebar .brand-link .nt-brand-sub { display: none; }
+.sidebar { padding-top: .5rem; }
+.nav-sidebar .nav-header {
+  color: var(--nt-slate-500); font-size: .7rem; letter-spacing: 1.2px;
+  font-weight: 700; padding: .8rem 1rem .4rem;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link {
+  color: var(--nt-slate-300);
+  border-radius: 8px; margin: 2px 8px; width: auto;
+  transition: background .15s, color .15s;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link:hover,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link:hover {
+  background: rgba(255,255,255,.06); color: #fff;
+}
+.sidebar-dark-primary .nav-sidebar > .nav-item > .nav-link.active,
+.sidebar-dark-primary .nav-sidebar .nav-treeview > .nav-item > .nav-link.active {
+  background: var(--nt-primary) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(0, 123, 255, .45) !important;
+}
+.nav-sidebar .nav-icon { font-size: .95rem; }
+
+/* ---------- Cards ---------- */
+.card {
+  border: 1px solid var(--nt-slate-200);
+  border-radius: var(--nt-radius);
+  box-shadow: var(--nt-shadow);
+}
+.card-header {
+  background: #fff;
+  border-bottom: 1px solid var(--nt-slate-200);
+  border-radius: var(--nt-radius) var(--nt-radius) 0 0 !important;
+  padding: .8rem 1.25rem;
+}
+.card-title { font-weight: 700; color: var(--nt-slate-800); font-size: 1.02rem; }
+.card-footer { background: var(--nt-slate-50); border-radius: 0 0 var(--nt-radius) var(--nt-radius) !important; }
+/* colored "primary" cards become white with a brand top accent */
+.card-primary:not(.card-outline) > .card-header {
+  background: #fff; color: var(--nt-slate-800);
+  border-top: 3px solid var(--nt-primary);
+}
+.card-primary:not(.card-outline) > .card-header .card-title { color: var(--nt-slate-800); }
+.card-primary.card-outline { border-top: 3px solid var(--nt-primary); }
+.card-info.card-outline { border-top: 3px solid var(--nt-sky); }
+.card-secondary.card-outline { border-top: 3px solid var(--nt-slate-500); }
+.card-danger.card-outline { border-top: 3px solid var(--nt-red); }
+.card-warning.card-outline { border-top: 3px solid var(--nt-amber); }
+.card-success.card-outline { border-top: 3px solid var(--nt-green); }
+.card .btn-tool { color: var(--nt-slate-400); }
+
+/* ---------- Stat cards (restyled AdminLTE small-box) ---------- */
+.small-box {
+  background: #fff !important;
+  border-radius: var(--nt-radius);
+  border: 1px solid var(--nt-slate-200);
+  box-shadow: var(--nt-shadow);
+  color: var(--nt-slate-700) !important;
+  position: relative; overflow: hidden;
+  /* fill the column so every card in a row shares the same top and bottom line */
+  height: calc(100% - 20px);
+}
+.small-box .inner { padding: 16px 18px; }
+.small-box .inner h3 { font-weight: 800; color: var(--nt-slate-900); font-size: 1.9rem; }
+.small-box .inner b { color: var(--nt-slate-500); font-size: .8rem; text-transform: uppercase; letter-spacing: .6px; }
+.small-box .inner p { color: var(--nt-slate-800); font-size: 1.6rem; font-weight: 800; margin-bottom: 4px; }
+.small-box .icon { color: var(--nt-slate-200); transition: none; }
+.small-box .icon > i { font-size: 55px; top: 14px; }
+.small-box.bg-info .icon { color: rgba(23, 162, 184, .18); }
+.small-box.bg-success .icon { color: rgba(40, 167, 69, .18); }
+.small-box.bg-warning .icon { color: rgba(253, 126, 20, .18); }
+.small-box.bg-danger .icon { color: rgba(220, 53, 69, .18); }
+.small-box.bg-secondary .icon { color: rgba(100, 116, 139, .18); }
+.small-box .small-box-footer { display: none; }
+.small-box a { color: var(--nt-primary) !important; }
+
+/* ---------- Buttons: flatten the loud gradients ---------- */
+.btn { border-radius: 8px; font-weight: 600; }
+[class*="bg-gradient-"].btn, .btn[class*="bg-gradient-"] { background-image: none !important; }
+.btn.bg-gradient-success { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; color: #fff; }
+.btn.bg-gradient-success:hover { background: var(--nt-primary-dark) !important; }
+.btn.bg-gradient-primary, .btn-primary { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; color: #fff; }
+.btn.bg-gradient-primary:hover, .btn-primary:hover { background: var(--nt-primary-dark) !important; }
+.btn.bg-gradient-info { background: var(--nt-sky) !important; border-color: var(--nt-sky) !important; color: #fff; }
+.btn.bg-gradient-danger { background: var(--nt-red) !important; border-color: var(--nt-red) !important; color: #fff; }
+.btn.bg-gradient-danger:hover { background: #bd2130 !important; }
+.btn.bg-gradient-secondary { background: #fff !important; border: 1px solid var(--nt-slate-300) !important; color: var(--nt-slate-600) !important; }
+.btn.bg-gradient-secondary:hover { background: var(--nt-slate-100) !important; color: var(--nt-slate-800) !important; }
+
+/* ---------- Forms ---------- */
+.form-control { border-radius: 8px; border-color: var(--nt-slate-300); color: var(--nt-slate-800); }
+.form-control:focus {
+  border-color: var(--nt-primary);
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, .15);
+}
+.col-form-label-sm { font-weight: 600; color: var(--nt-slate-600); }
+label { color: var(--nt-slate-700); }
+.input-group-text { background: var(--nt-slate-100); border-color: var(--nt-slate-300); color: var(--nt-slate-500); border-radius: 8px; }
+.select2-container--bootstrap4 .select2-selection { border-color: var(--nt-slate-300); border-radius: 8px; }
+.select2-container--bootstrap4.select2-container--focus .select2-selection {
+  border-color: var(--nt-primary); box-shadow: 0 0 0 3px rgba(0, 123, 255, .15);
+}
+.select2-container--bootstrap4 .select2-selection--multiple .select2-selection__choice {
+  background: var(--nt-primary-light); border: 1px solid var(--nt-primary); color: var(--nt-primary-dark); border-radius: 6px;
+}
+
+/* ---------- Tables ---------- */
+.table thead th {
+  background: var(--nt-slate-50);
+  color: var(--nt-slate-600);
+  border-bottom: 2px solid var(--nt-slate-200) !important;
+  font-size: .8rem; text-transform: uppercase; letter-spacing: .5px;
+  font-weight: 700;
+}
+.table td, .table th { border-color: var(--nt-slate-200); vertical-align: middle; }
+.table-hover tbody tr:hover { background: #f0f7ff; }
+.table-striped tbody tr:nth-of-type(odd) { background: var(--nt-slate-50); }
+.dataTables_wrapper .dt-buttons .btn { background: #fff; border: 1px solid var(--nt-slate-300); color: var(--nt-slate-600); }
+.page-item.active .page-link { background: var(--nt-primary); border-color: var(--nt-primary); }
+.page-link { color: var(--nt-primary); }
+
+/* ---------- Progress ---------- */
+.progress { border-radius: 999px; background: var(--nt-slate-200); }
+.progress-bar { background: linear-gradient(90deg, var(--nt-primary) 0%, #4dabf7 100%) !important; font-weight: 600; }
+/* slim progress line (patients wizard) */
+.nt-progress-line {
+  height: 6px; border-radius: 999px; background: var(--nt-slate-200);
+  overflow: hidden; margin-bottom: 6px;
+}
+.nt-progress-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--nt-primary) 0%, #4dabf7 100%);
+  transition: width .4s ease;
+}
+
+/* ---------- Patients wizard stepper ---------- */
+.nt-stepper { display: flex; align-items: flex-start; margin-bottom: 12px; }
+.nt-step {
+  flex: 1 1 0; min-width: 84px; position: relative; text-align: center;
+  text-decoration: none; padding: 0 4px;
+}
+.nt-step:hover { text-decoration: none; }
+/* connector line between circles */
+.nt-step:not(:first-child)::before {
+  content: ""; position: absolute; top: 16px; height: 3px; border-radius: 99px;
+  left: calc(-50% + 24px); right: calc(50% + 24px);
+  background: var(--nt-slate-200); transition: background .3s;
+}
+.nt-step.connected:not(:first-child)::before { background: var(--nt-primary); }
+.nt-step-circle {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .85rem;
+  background: #fff; border: 2px solid var(--nt-slate-300); color: var(--nt-slate-500);
+  position: relative; z-index: 1; transition: all .15s;
+}
+.nt-step-label {
+  display: block; margin-top: 6px; font-size: .76rem; font-weight: 600;
+  color: var(--nt-slate-500); line-height: 1.25;
+}
+.nt-step.done .nt-step-circle { background: var(--nt-primary); border-color: var(--nt-primary); color: #fff; }
+.nt-step.done .nt-step-label { color: var(--nt-primary-dark); }
+.nt-step.active .nt-step-circle {
+  background: var(--nt-primary); border-color: var(--nt-primary); color: #fff;
+  box-shadow: 0 0 0 5px rgba(0, 123, 255, .18);
+}
+.nt-step.active .nt-step-label { color: var(--nt-primary); }
+.nt-step.locked { opacity: .45; pointer-events: none; }
+.nt-step:not(.locked):hover .nt-step-circle { border-color: var(--nt-primary); }
+@media (max-width: 768px) { .nt-stepper { overflow-x: auto; padding-bottom: 4px; } }
+.preview-section h5 {
+  border-bottom: 1px solid var(--nt-slate-200); padding-bottom: 8px;
+  font-weight: 700; color: var(--nt-slate-800); font-size: 1.02rem;
+}
+.preview-section dt { color: var(--nt-slate-500); font-weight: 600; font-size: .86rem; }
+.preview-section dd { color: var(--nt-slate-800); }
+
+/* ---------- Login page ---------- */
+.login-page {
+  background: linear-gradient(135deg, var(--nt-slate-900) 0%, #0a3d7a 60%, var(--nt-primary) 100%);
+  min-height: 100vh;
+}
+.login-box { width: 400px; }
+.login-box .card {
+  border: none; border-radius: 14px; box-shadow: 0 20px 50px rgba(2, 6, 23, .45);
+  overflow: hidden;
+}
+.nt-login-brand {
+  background: #fff; text-align: center; padding: 26px 20px 6px;
+}
+.nt-login-brand img {
+  width: 72px; height: 72px; border-radius: 50%;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .18); margin-bottom: 12px;
+}
+.nt-login-brand .nt-login-title {
+  font-size: 1.5rem; font-weight: 800; letter-spacing: 3px; color: var(--nt-slate-900);
+  display: block;
+}
+.nt-login-brand .nt-login-sub {
+  color: var(--nt-slate-500); font-size: .8rem; display: block; margin-top: 2px;
+}
+.login-card-body, .login-box .card-body { border-radius: 0 0 14px 14px; }
+.login-box .btn-primary { background: var(--nt-primary) !important; border-color: var(--nt-primary) !important; }
+.login-box .btn-primary:hover { background: var(--nt-primary-dark) !important; }
+.login-box-msg { padding: 0 0 12px; }
+
+/* ---------- Footer ---------- */
+.main-footer {
+  background: #fff; border-top: 1px solid var(--nt-slate-200);
+  color: var(--nt-slate-500); font-size: .85rem;
+}
+.main-footer strong { color: var(--nt-slate-600); font-weight: 600; }
+
+/* ---------- Misc ---------- */
+.alert { border-radius: var(--nt-radius); }
+.swal2-popup { border-radius: 14px !important; font-family: 'Source Sans Pro', sans-serif !important; }
+.nt-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.nt-toolbar label { margin: 0; font-weight: 700; color: var(--nt-slate-700); }
+.nt-toolbar .form-control { width: auto; }
+
+/* ---------- Blinking inline warnings (duplicate batch / near expiry) ---------- */
+.mp-blink-warn {
+  font-weight: 600;
+  color: var(--nt-amber);
+  background: #fff8e6;
+  border: 1px solid var(--nt-amber);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  animation: mpBlink 1s ease-in-out infinite;
+}
+.mp-blink-warn.mp-blink-danger {
+  color: var(--nt-red);
+  background: #fdecea;
+  border-color: var(--nt-red);
+}
+@keyframes mpBlink { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .mp-blink-warn { animation: none; } }
+
+/* ---------- Checkbox multi-select card (Raw Data filter) ---------- */
+.mp-msel.card { margin-bottom: 0; border: 1px solid var(--nt-slate-200); border-radius: var(--nt-radius); box-shadow: var(--nt-shadow); overflow: hidden; }
+.mp-msel .mp-msel-head { position: sticky; top: 0; z-index: 2; background: #fff; padding: 10px 12px; border-bottom: 1px solid var(--nt-slate-200); }
+.mp-msel-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.mp-msel-name { font-weight: 700; color: var(--nt-slate-800); font-size: .9rem; }
+.mp-msel-count { font-size: .72rem; }
+.mp-msel-search-wrap { position: relative; margin-bottom: 8px; }
+.mp-msel-search-wrap > i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--nt-slate-400); font-size: .8rem; }
+.mp-msel-search { padding-left: 30px; border-radius: 8px; }
+.mp-msel-actions { display: flex; align-items: center; gap: 8px; }
+.mp-msel-actions .btn-xs { padding: 2px 9px; font-size: .72rem; font-weight: 600; border-radius: 6px; border: 1px solid var(--nt-slate-300); background: #fff; color: var(--nt-slate-600); }
+.mp-msel-actions .btn-xs:hover { background: var(--nt-slate-100); color: var(--nt-primary); border-color: var(--nt-primary); }
+.mp-msel-empty { font-size: .72rem; margin-left: auto; }
+.mp-msel-list { max-height: 220px; overflow-y: auto; padding: 6px; }
+.mp-msel-item { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 400; font-size: .85rem; color: var(--nt-slate-700); }
+.mp-msel-item:hover { background: #f0f7ff; }
+.mp-msel-item input { margin: 0; cursor: pointer; flex: 0 0 auto; }
+.mp-msel-item:has(input:checked) { background: var(--nt-primary-light); color: var(--nt-primary-dark); font-weight: 600; }
+.mp-msel-list::-webkit-scrollbar { width: 8px; }
+.mp-msel-list::-webkit-scrollbar-thumb { background: var(--nt-slate-300); border-radius: 8px; }
+
+/* ---------- Filter chips (year / month / category / acceptance / result) ---------- */
+.mp-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mp-chips .form-check-inline { margin: 0; padding: 5px 12px; border: 1px solid var(--nt-slate-300); border-radius: 999px; background: #fff; cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
+.mp-chips .form-check-inline:hover { border-color: var(--nt-primary); }
+.mp-chips .form-check-inline .form-check-input { margin-top: 0; }
+.mp-chips .form-check-inline .form-check-label { margin-left: 4px; font-size: .82rem; cursor: pointer; }
+.mp-chips .form-check-inline:has(.form-check-input:checked) { background: var(--nt-primary-light); border-color: var(--nt-primary); }
+.mp-chips .form-check-inline:has(.form-check-input:checked) .form-check-label { color: var(--nt-primary-dark); font-weight: 600; }
+
+/* ---------- Export button: hover lift + sticky full-width on phones ---------- */
+.mp-export-btn { transition: transform .1s ease, box-shadow .15s ease; }
+.mp-export-btn:hover { transform: translateY(-1px); box-shadow: var(--nt-shadow-md); }
+@media (max-width: 576px) {
+  .mp-export-btn { position: sticky; bottom: 10px; width: 100%; float: none !important; z-index: 5; box-shadow: var(--nt-shadow-md); }
+}
+
+/* ---------- Filter cards: standardized control sizing + Select2 multi enhancer ---------- */
+/* Uniform 44–46px control height + consistent radius for filter inputs/selects. */
+.mp-filter-form label:not(.form-check-label),
+.mp-filter-form .col-form-label-sm { font-weight: 600; color: var(--nt-slate-700); margin-bottom: 6px; display: inline-block; }
+select.mp-ctl.form-control { height: 44px; border-radius: 8px; }
+
+/* Select2 multi header: title + live count badge + Select All / Clear All. */
+.mp-s2-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+.mp-s2-title { font-weight: 600; color: var(--nt-slate-700); }
+.mp-s2-count { font-size: .72rem; }
+.mp-s2-actions { display: flex; gap: 6px; margin-left: auto; }
+.mp-s2-actions .btn-xs { padding: 3px 10px; font-size: .72rem; font-weight: 600; border-radius: 6px; border: 1px solid var(--nt-slate-300); background: #fff; color: var(--nt-slate-600); line-height: 1.35; }
+.mp-s2-actions .btn-xs:hover { background: var(--nt-slate-100); color: var(--nt-primary); border-color: var(--nt-primary); }
+
+/* Select2 multi control sized to match the other 44–46px controls. */
+.mp-s2-container.select2-container--bootstrap4 .select2-selection--multiple { min-height: 46px; border-radius: 8px; padding: 3px 6px; }
+.mp-s2-container.select2-container--bootstrap4 .select2-selection--multiple .select2-search__field { margin-top: 7px; }
+
+/* Single Select2 (e.g. Dzongkhag) standardized to 44px within filter forms. */
+.mp-filter-form .select2-container--bootstrap4 .select2-selection--single { height: 44px; border-radius: 8px; }
+.mp-filter-form .select2-container--bootstrap4 .select2-selection--single .select2-selection__rendered { line-height: 42px; }
+/* Arrow keeps the theme's own top:50% / right:3px centering — do NOT set a height on it,
+   or the absolutely-positioned box overflows below the taller 44px field. */
+
+/* load_site.php re-injects a Bootstrap Dual List Box after a Dzongkhag change; keep it
+   invisible inside the modern filter form so only the .mp-msd dropdown is ever shown
+   (the MutationObserver also removes it from the DOM). Scoped to .mp-filter-form so the
+   legacy dual list boxes on other pages (e.g. test_table.php) are unaffected. */
+.mp-filter-form .bootstrap-duallistbox-container { display: none !important; }
+
+/* ---------- Collapsed multi-select dropdown (mp-msd) — fixed height, summary + floating panel ---------- */
+.mp-msd { position: relative; }
+/* Oct 2026 — Test Parameters container auto-grows so EVERY selected tag is
+   visible. No `+N` summary; the summary is itself the chip row. Exact spec:
+   height:auto, min-height:42px, flex-wrap:wrap, gap:4px.
+   `!important` on the layout rules guards against any older cached styles. */
+.mp-msd-toggle { display: flex !important; align-items: flex-start; justify-content: space-between; width: 100%; height: auto !important; min-height: 42px !important; padding: 6px 10px; text-align: left; background: #fff; border: 1px solid var(--nt-slate-300); border-radius: 8px; color: var(--nt-slate-800); font-weight: 400; }
+.mp-msd-toggle:hover { border-color: var(--nt-slate-400); }
+.mp-msd-toggle:focus { outline: none; border-color: var(--nt-primary); box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .15); }
+.mp-msd-summary { flex: 1 1 auto; display: flex !important; flex-wrap: wrap !important; gap: 4px !important; align-items: center; min-height: 28px; overflow: visible !important; text-overflow: initial !important; white-space: normal !important; line-height: 1.3; }
+.mp-msd-summary.mp-msd-ph { color: var(--nt-slate-400); display: flex !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-msd-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 4px 2px 8px; background: var(--nt-primary-light, #e0ecff); color: var(--nt-primary-dark, #0b5ed7); border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .2px; line-height: 1.3; }
+.mp-msd-chip-text { white-space: normal; word-break: break-word; }
+.mp-msd-chip-x { border: 0; background: transparent; padding: 0 4px; margin: 0; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; opacity: .7; }
+.mp-msd-chip-x:hover { opacity: 1; color: var(--nt-danger, #dc3545); }
+.mp-msd-caret { margin-top: 6px; align-self: center; }
+.mp-msd-caret { flex: 0 0 auto; margin-left: 8px; font-size: .72rem; color: var(--nt-slate-400); transition: transform .15s ease; }
+.mp-msd.open .mp-msd-caret { transform: rotate(180deg); }
+.mp-msd-panel { display: none; position: absolute; z-index: 1050; top: calc(100% + 4px); left: 0; right: 0; background: #fff; border: 1px solid var(--nt-slate-200); border-radius: 8px; box-shadow: var(--nt-shadow-md); padding: 8px; }
+.mp-msd.open .mp-msd-panel { display: block; }
+.mp-msd-search-wrap { position: relative; margin-bottom: 8px; }
+.mp-msd-search-wrap > i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--nt-slate-400); font-size: .8rem; }
+.mp-msd-search { padding-left: 30px; border-radius: 8px; }
+.mp-msd-actions { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.mp-msd-actions .btn-xs { padding: 2px 9px; font-size: .72rem; font-weight: 600; border-radius: 6px; border: 1px solid var(--nt-slate-300); background: #fff; color: var(--nt-slate-600); }
+.mp-msd-actions .btn-xs:hover { background: var(--nt-slate-100); color: var(--nt-primary); border-color: var(--nt-primary); }
+.mp-msd-count { margin-left: auto; font-size: .72rem; }
+.mp-msd-list { max-height: 220px; overflow-y: auto; }
+.mp-msd-item { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-weight: 400; font-size: .85rem; color: var(--nt-slate-700); }
+.mp-msd-item:hover { background: #f0f7ff; }
+.mp-msd-item input { margin: 0; flex: 0 0 auto; }
+.mp-msd-item:has(input:checked) { background: var(--nt-primary-light); color: var(--nt-primary-dark); font-weight: 600; }
+.mp-msd-empty { display: none; font-size: .78rem; padding: 8px; text-align: center; }
+.mp-msd-list::-webkit-scrollbar { width: 8px; }
+.mp-msd-list::-webkit-scrollbar-thumb { background: var(--nt-slate-300); border-radius: 8px; }
+
+/* ======================================================================
+   New Registration form — 2026 enterprise responsive grid
+   (scoped to .mp-reg-body so no other form/page is affected)
+   ====================================================================== */
+.mp-reg-body { display: flex; flex-direction: column; gap: 18px; }
+.mp-reg-section { background: #fff; border: 1px solid var(--nt-slate-200); border-radius: 12px; box-shadow: var(--nt-shadow); padding: 18px 18px 4px; }
+.mp-reg-title { font-size: .92rem; font-weight: 700; color: var(--nt-primary-dark); margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--nt-slate-100); display: flex; align-items: center; gap: 9px; }
+.mp-reg-title i { color: var(--nt-primary); }
+.mp-reg-body .mp-field { margin-bottom: 16px; }
+.mp-lbl { display: block; font-size: .82rem; font-weight: 600; color: var(--nt-slate-700); margin-bottom: 6px; text-align: left; line-height: 1.3; }
+.mp-req { color: var(--nt-danger, #dc3545); font-weight: 700; }
+
+/* uniform control sizing: 46px, 10px radius, modern focus/hover */
+.mp-reg-body .form-control { height: 46px; border-radius: 10px; border-color: var(--nt-slate-300); transition: border-color .15s ease, box-shadow .15s ease; }
+.mp-reg-body textarea.form-control { height: auto; min-height: 88px; }
+.mp-reg-body .form-control:hover { border-color: var(--nt-slate-400); }
+.mp-reg-body .form-control:focus { border-color: var(--nt-primary); box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .12); }
+/* Read-only controls (View page) — same grid/typography as Registration, visibly read-only */
+.mp-reg-body .form-control[readonly] { background: var(--nt-slate-50); color: var(--nt-slate-700); cursor: default; box-shadow: none; }
+.mp-reg-body .form-control[readonly]:focus { border-color: var(--nt-slate-300); box-shadow: none; }
+/* Select2 single -> match the inputs exactly */
+.mp-reg-body .select2-container--bootstrap4 .select2-selection--single { height: 46px; border-radius: 10px; border-color: var(--nt-slate-300); }
+.mp-reg-body .select2-container--bootstrap4 .select2-selection--single .select2-selection__rendered { line-height: 44px; }
+/* Do NOT set a height on the arrow: it is absolutely positioned (top:50%) by the theme, so
+   a fixed height makes it overflow below the taller 46px field. Let the theme center it. */
+.mp-reg-body .select2-container { width: 100% !important; }
+/* Date input-group: seamless, correctly-aligned calendar button */
+.mp-reg-body .input-group.date .form-control { height: 46px; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.mp-reg-body .input-group.date .input-group-text { height: 46px; border-radius: 0 10px 10px 0; background: var(--nt-slate-50); border-color: var(--nt-slate-300); color: var(--nt-slate-500); }
+/* Test Parameters (mp-msd) sits full width and reads like the other controls.
+   height is auto so chips can wrap vertically; min-height matches the former
+   fixed 46 px so an empty control still aligns with neighbouring inputs. */
+.mp-reg-body .mp-msd-toggle { min-height: 46px; height: auto; border-radius: 10px; }
+/* Footer + modern save button */
+.mp-reg-footer { border-top: 1px solid var(--nt-slate-200); margin-top: 4px; padding-top: 16px; }
+.mp-reg-save { min-height: 46px; padding: 0 26px; border-radius: 10px; font-weight: 600; transition: transform .1s ease, box-shadow .15s ease; }
+.mp-reg-save:hover { transform: translateY(-1px); box-shadow: var(--nt-shadow-md); }
+.mp-reg-save:focus { box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .3); }
+@media (max-width: 576px) { .mp-reg-save { width: 100%; } }
+
+/* ======================================================================
+   View Registration & Result — read-only details screen (ERP/LIMS style)
+   ====================================================================== */
+.mp-view-section { background: #fff; border: 1px solid var(--nt-slate-200); border-radius: 12px; box-shadow: var(--nt-shadow); padding: 18px 20px 6px; margin-bottom: 18px; }
+.mp-view-title { font-size: .92rem; font-weight: 700; color: var(--nt-primary-dark); margin-bottom: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--nt-slate-100); display: flex; align-items: center; gap: 9px; }
+.mp-view-title i { color: var(--nt-primary); }
+.mp-view-item { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px dashed var(--nt-slate-100); min-height: 46px; }
+.mp-view-label { flex: 0 0 42%; max-width: 42%; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; color: var(--nt-slate-500); line-height: 1.35; }
+.mp-view-value { flex: 1 1 auto; font-size: .9rem; color: var(--nt-slate-800); font-weight: 500; word-break: break-word; }
+.mp-view-empty { color: var(--nt-slate-300); }
+/* Long free-text values (composition / description / remarks) stack the value under the label */
+.mp-view-block .mp-view-item { flex-direction: column; align-items: stretch; }
+.mp-view-block .mp-view-label { flex: none; max-width: 100%; margin-bottom: 6px; }
+.mp-view-block .mp-view-value { white-space: pre-wrap; background: var(--nt-slate-50); border: 1px solid var(--nt-slate-200); border-radius: 8px; padding: 10px 12px; min-height: 48px; }
+.mp-view-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; border-top: 1px solid var(--nt-slate-200); margin-top: 6px; padding-top: 16px; }
+
+/* ---------- Dashboard KPI (small-box): compact right-aligned icon, number as focus ----------
+   AdminLTE positions the <i> ITSELF (position:absolute; right:15px; top:20px) and scopes its
+   size to `.icon>i.fas` (70px). So we (a) match that specificity to actually resize it, and
+   (b) style the <i> directly — never put `transform` on `.icon`, because that makes it the
+   containing block for the absolute <i> and pushes the icon off the card (the earlier
+   "icons disappeared" bug). Icon = 44px, right-aligned, vertically centered, ~15% opacity. */
+.small-box .icon > i,
+.small-box .icon > i.fa, .small-box .icon > i.fas, .small-box .icon > i.far, .small-box .icon > i.fab, .small-box .icon > i.fal {
+  font-size: 44px; top: 50%; right: 16px; transform: translateY(-50%);
+}
+.small-box:hover .icon > i,
+.small-box:hover .icon > i.fa, .small-box:hover .icon > i.fas, .small-box:hover .icon > i.far, .small-box:hover .icon > i.fab, .small-box:hover .icon > i.fal {
+  transform: translateY(-50%) scale(1.08);
+}
+/* Meaningful per-KPI watermark colours (subtle tint, ~16-22% alpha) — targeted by each
+   card's unique icon class, so no single grey rule and no markup change. Same specificity
+   as the base rule above, declared after it, so these win. */
+.small-box .icon > i.fa-vials           { color: rgba(59, 130, 246, .20); }  /* Samples Tested        — Blue   */
+.small-box .icon > i.fa-hourglass-half  { color: rgba(245, 158, 11, .22); }  /* Test Pending          — Amber  */
+.small-box .icon > i.fa-user-shield     { color: rgba(139, 92, 246, .22); }  /* Verification Pending  — Purple */
+.small-box .icon > i.fa-times-circle    { color: rgba(239, 68, 68, .20); }   /* Samples Rejected      — Red    */
+.small-box .icon > i.fa-clipboard-check { color: rgba(99, 102, 241, .22); }  /* Total Tests Conducted — Indigo */
+.small-box .icon > i.fa-check-circle    { color: rgba(34, 197, 94, .20); }   /* Complies              — Green  */
+.small-box .icon > i.fa-ban             { color: rgba(249, 115, 22, .22); }  /* Non-Complies          — Orange */
+.small-box .icon > i.fa-flask           { color: rgba(6, 182, 212, .22); }   /* Pending Test Params   — Cyan   */
+.small-box .inner { padding: 14px 18px; }
+.small-box .inner p { font-size: 2rem; font-weight: 700; line-height: 1.1; margin: 2px 0 0; }  /* the number = primary focus */
+.small-box .inner b { font-size: .9rem; font-weight: 600; opacity: .92; }                       /* the label */
+
+/* =======================================================================
+   SINGLE reusable dropdown standard — one chevron for EVERY control
+   (native <select> AND Select2), same size / weight / vertical alignment.
+   Chevron defined once as a custom property and reused everywhere.
+   ======================================================================= */
+:root { --mp-chevron: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%2364748b'%20stroke-width='2.6'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M6%209l6%206%206-6'/%3E%3C/svg%3E"); }
+
+/* Native single selects: remove the OS arrow, paint the shared 16px chevron */
+select.form-control:not([multiple]) {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  background-image: var(--mp-chevron);
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 16px 16px;
+  padding-right: 36px;
+}
+select.form-control::-ms-expand { display: none; }
+
+/* Select2 single control: replace the tiny CSS triangle with the SAME 16px chevron, centered */
+.select2-container--bootstrap4 .select2-selection--single .select2-selection__arrow { top: 0; right: 8px; width: 20px; height: 100%; }
+.select2-container--bootstrap4 .select2-selection--single .select2-selection__arrow b {
+  border: 0 !important; margin: 0 !important; position: absolute;
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 16px; height: 16px;
+  background: var(--mp-chevron) no-repeat center; background-size: 16px 16px;
+}
+
+/* ---------- Filter panel select sizing (chevron now comes from the global standard) ---------- */
+.mp-filter-panel select.form-control { height: 46px; border-radius: 10px; transition: border-color .15s ease, box-shadow .15s ease; }
+.mp-filter-panel select.form-control:hover { border-color: var(--nt-slate-400); }
+.mp-filter-panel select.form-control:focus { border-color: var(--nt-primary); box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .15); }
+.mp-filter-panel .mp-filter-btn { height: 46px; justify-content: center; }
+
+/* ---------- Registration listing: sticky header, hover, tidy DataTables toolbar ---------- */
+#regtest thead th { position: sticky; top: 0; z-index: 2; background: var(--nt-slate-100); box-shadow: inset 0 -1px 0 var(--nt-slate-200); }
+#regtest tbody tr { transition: background .12s ease; }
+#regtest tbody tr:hover > td { background: #f0f7ff; }
+#regtest_wrapper .dt-buttons .btn { border-radius: 8px; margin: 0 3px; }
+#regtest_wrapper .dataTables_filter input { height: 40px; border-radius: 8px; }
+#regtest_wrapper .dataTables_length select { height: 40px; border-radius: 8px; }
+#regtest_wrapper .dataTables_paginate .paginate_button { border-radius: 8px !important; }
+
+/* ---------- Filter action buttons (Search / Reset / Export / Back) — uniform + premium ---------- */
+.mp-filter-btn, .mp-back-btn { min-height: 44px; padding: 0 22px; border-radius: 8px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; transition: transform .1s ease, box-shadow .15s ease; }
+.mp-filter-btn:hover, .mp-back-btn:hover { transform: translateY(-1px); box-shadow: var(--nt-shadow-md); }
+.mp-filter-btn:focus, .mp-back-btn:focus { box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .25); }
+
+/* ---------- Reset button — one professional-grey standard, app-wide (UI-only) ----------
+   Every Reset control carries .mp-reset-btn (and native reset elements are covered too),
+   giving a single professional slate-grey look with white text and full interaction
+   states. This intentionally overrides the white .bg-gradient-secondary skin for RESET
+   actions only — Back / Cancel secondary buttons are left exactly as they are. Sizing
+   (height / padding / radius / font) still flows from .mp-filter-btn where present, so
+   Reset stays aligned with the adjacent Search / Submit / Save buttons. No behaviour,
+   handler, id, or markup logic is changed — this is purely presentational. */
+.mp-reset-btn,
+.btn.mp-reset-btn,
+.btn.bg-gradient-secondary.mp-reset-btn,
+input[type="reset"],
+button[type="reset"] {
+	background: var(--nt-slate-500) !important;   /* #64748b — professional grey */
+	border: 1px solid var(--nt-slate-500) !important;
+	color: #fff !important;                        /* white text, AA contrast */
+	font-weight: 600 !important;
+	border-radius: 8px !important;
+	box-shadow: none !important;
+	transition: transform .1s ease, box-shadow .15s ease, background-color .15s ease;
+}
+.mp-reset-btn:hover,
+.btn.bg-gradient-secondary.mp-reset-btn:hover,
+input[type="reset"]:hover,
+button[type="reset"]:hover {
+	background: var(--nt-slate-600) !important;    /* #475569 — darker on hover */
+	border-color: var(--nt-slate-600) !important;
+	color: #fff !important;
+}
+.mp-reset-btn:focus,
+.mp-reset-btn.focus,
+.btn.bg-gradient-secondary.mp-reset-btn:focus,
+input[type="reset"]:focus,
+button[type="reset"]:focus {
+	background: var(--nt-slate-600) !important;
+	border-color: var(--nt-slate-600) !important;
+	color: #fff !important;
+	box-shadow: 0 0 0 .2rem rgba(100, 116, 139, .35) !important;   /* slate focus ring */
+	outline: none !important;
+}
+.mp-reset-btn:active,
+.btn.bg-gradient-secondary.mp-reset-btn:active,
+input[type="reset"]:active,
+button[type="reset"]:active {
+	background: var(--nt-slate-700) !important;    /* #334155 — pressed */
+	border-color: var(--nt-slate-700) !important;
+	color: #fff !important;
+}
+.mp-reset-btn:disabled,
+.mp-reset-btn.disabled,
+.btn.bg-gradient-secondary.mp-reset-btn:disabled,
+input[type="reset"]:disabled,
+button[type="reset"]:disabled {
+	background: var(--nt-slate-400) !important;    /* #94a3b8 — muted */
+	border-color: var(--nt-slate-400) !important;
+	color: #fff !important;
+	opacity: .65;
+	cursor: not-allowed;
+	box-shadow: none !important;
+	transform: none !important;
+}
+
+/* ---------- User Management action icons — single family, equal size, hover ---------- */
+.mp-uaction { width: 32px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; margin-left: 2px; transition: transform .1s ease; }
+.mp-uaction:hover { transform: translateY(-1px); }
+
+/* ---------- Consistent placeholder styling across every form ---------- */
+.form-control::placeholder, textarea::placeholder { color: var(--nt-slate-400); opacity: 1; font-weight: 400; }
+
+/* ---------- Client-side filter/export validation (red border + inline message) ---------- */
+.mp-msd-toggle.mp-invalid, .mp-filter-group.mp-invalid, .form-control.mp-invalid { border-color: var(--nt-danger, #dc3545) !important; box-shadow: 0 0 0 .12rem rgba(220, 53, 69, .18); }
+.mp-invalid-msg { display: block; color: var(--nt-danger, #dc3545); font-size: .8rem; font-weight: 500; margin-top: 5px; }
+
+/* ---------- Unified validation feedback ---------- */
+/* jQuery Validate appends <span class="invalid-feedback"> ONLY when a field is invalid and
+   removes it on correction, so forcing it visible is safe and guarantees the red message
+   shows even when it is not a direct sibling of the input (Select2, chips, custom controls). */
+span.invalid-feedback { display: block; margin-top: 4px; font-size: .8rem; }
+.is-invalid { border-color: var(--nt-danger, #dc3545) !important; }
+.mp-msd-toggle.is-invalid, .select2-container.is-invalid .select2-selection { border-color: var(--nt-danger, #dc3545) !important; }
+
+/* ---------- Validation layout: reserve space so inline error text never clips / overlaps ----------
+   Inline messages always flow in the normal document (never absolutely positioned), and the
+   containing filter/registration cells carry a little bottom room so an appended error pushes
+   subsequent content down cleanly instead of bleeding into the next card / row (fixes the
+   TEST CATEGORY, SAMPLE ACCEPTANCE and FINAL RESULT clipping). */
+.mp-invalid-msg, span.invalid-feedback { position: static !important; width: 100%; clear: both; }
+.mp-filter-form .form-group, .mp-filter-panel .form-group { margin-bottom: 1.4rem; }
+.mp-filter-group { overflow: visible; }                     /* let a sibling error beneath an equal-height group show */
+.mp-filter-group + .mp-invalid-msg { margin-top: 6px; }
+.mp-reg-section .form-group { margin-bottom: 1.25rem; }     /* room under registration radio/checkbox rows */
+.mp-reg-section .form-group.row { padding-bottom: 2px; }
+
+/* ---------- Chart result card (Total Test / Test Compliance) — parity with Raw Data cards ---------- */
+/* Long header subtitle (Year / Month / Parameter list) wraps instead of clipping/overflowing. */
+.mp-result-card .card-title { display: block; white-space: normal; word-break: break-word; line-height: 1.45; }
+.mp-result-card .card-header { height: auto; }
+/* Keep the plot fully responsive and prevent any horizontal spill on small screens. */
+.mp-result-card .card-body { padding: 16px; overflow-x: auto; }
+.mp-result-card [id^="container"] { width: 100%; min-width: 0; }
+
+/* Compact filter-group card: wraps a related set of chips (Category / Result / Year / Month). */
+.mp-filter-group { border: 1px solid var(--nt-slate-200); background: var(--nt-slate-50); border-radius: 8px; padding: 10px 12px; }
+.mp-fg-label { display: block; font-weight: 600; font-size: .78rem; letter-spacing: .02em; text-transform: uppercase; color: var(--nt-slate-500); margin-bottom: 8px; }
+.mp-filter-group .mp-chips { margin: 0; }
+
+/* Professional filter footer: right-aligned action area separated by a rule. */
+.mp-filter-footer { border-top: 1px solid var(--nt-slate-200); margin-top: 18px; padding-top: 14px; text-align: right; }
+
+/* Generate button: standardized height, hover lift, visible focus ring, full-width on phones. */
+.mp-gen-btn { min-height: 44px; padding: 0 22px; border-radius: 8px; transition: transform .1s ease, box-shadow .15s ease; }
+.mp-gen-btn:hover { transform: translateY(-1px); box-shadow: var(--nt-shadow-md); }
+.mp-gen-btn:focus { box-shadow: 0 0 0 .2rem rgba(0, 123, 255, .35); }
+@media (max-width: 576px) { .mp-gen-btn { width: 100%; } }

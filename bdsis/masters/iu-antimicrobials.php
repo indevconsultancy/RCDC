@@ -1,0 +1,206 @@
+<?php
+/**
+ * Save endpoint for masters/antimicrobials.php. POST only.
+ *
+ * Guards: bdsis_require_module -> bdsis_require_admin (from _inc.php)
+ *         -> bdsis_csrf_require. Actions: insert / update / retire / restore.
+ *
+ * Retire and restore write status only; there is no hard delete. Every read in
+ * the application filters `status=1` (verified in bdsis_mic_agents, the DD
+ * blank query, both AST save loops, and the report builders), so a retired
+ * antibiotic falls out of every dropdown immediately while its historical AST
+ * readings keep resolving through the master row.
+ */
+require_once __DIR__ . '/_inc.php';
+bdsis_csrf_require();
+
+/* RBAC gate for antimicrobials (local BDSIS master).
+   Add / edit / retire / restore -> CONTRIBUTOR or ADMIN. */
+bdsis_masters_require_write('antimicrobials', 'write');
+
+if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    mdFlash('danger', 'Master-data actions must be submitted from the form.');
+    mdRedirect('antimicrobials.php');
+}
+
+$isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+       || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'application/json') !== false);
+
+$do     = isset($_POST['do'])     ? (string)$_POST['do']            : '';
+$code   = isset($_POST['code'])   ? trim((string)$_POST['code'])    : '';
+$mid    = isset($_POST['mid'])    ? trim((string)$_POST['mid'])     : '';
+$agent  = isset($_POST['agent'])  ? trim((string)$_POST['agent'])   : '';
+$content= isset($_POST['content'])? trim((string)$_POST['content']) : '';
+$sus    = isset($_POST['sus'])    ? trim((string)$_POST['sus'])     : '';
+$int1   = isset($_POST['int1'])   ? trim((string)$_POST['int1'])    : '';
+$int2   = isset($_POST['int2'])   ? trim((string)$_POST['int2'])    : '';
+$resB   = isset($_POST['res'])    ? trim((string)$_POST['res'])     : '';
+$status = isset($_POST['status']) ? (string)$_POST['status']        : '1';
+$status = ($status === '0') ? '0' : '1';
+
+if ($code === '' || !preg_match('~^[A-Za-z0-9_-]{1,15}$~', $code)) {
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array('success' => false, 'message' => 'Code is required and must be 1-15 alphanumeric characters (dash / underscore allowed).'));
+        exit;
+    }
+    mdFlash('danger', 'Code is required and must be 1-15 alphanumeric characters (dash / underscore allowed).');
+    mdRedirect('antimicrobials.php');
+}
+if (!in_array($mid, array('01','02'), true)) {
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array('success' => false, 'message' => 'Method must be Disk Diffusion (01) or MIC (02).'));
+        exit;
+    }
+    mdFlash('danger', 'Method must be Disk Diffusion (01) or MIC (02).');
+    mdRedirect('antimicrobials.php');
+}
+
+/* Breakpoint fields are optional (MIC often leaves them blank); when present,
+   they must be numeric. Store as NULL when blank so aggregate queries see the
+   absence rather than a placeholder zero. */
+$numOrNull = function ($v) {
+    $t = trim((string)$v);
+    if ($t === '') { return null; }
+    if (!is_numeric($t)) { return false; }
+    return $t;
+};
+$susV  = ($do === 'insert' || $do === 'update') ? $numOrNull($sus)  : null;
+$i1V   = ($do === 'insert' || $do === 'update') ? $numOrNull($int1) : null;
+$i2V   = ($do === 'insert' || $do === 'update') ? $numOrNull($int2) : null;
+$resV  = ($do === 'insert' || $do === 'update') ? $numOrNull($resB) : null;
+if (($do === 'insert' || $do === 'update')
+    && ($susV === false || $i1V === false || $i2V === false || $resV === false)) {
+    mdFlash('danger', 'Breakpoints must be numeric (or left blank).');
+    mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+}
+
+switch ($do) {
+    case 'insert':
+        if ($agent === '') { mdFlash('danger', 'Antimicrobial name is required.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $chk = $bdsis->prepare("SELECT 1 FROM ms_ast_table WHERE code=? AND ast_method_id=?");
+        $chk->bind_param("ss", $code, $mid); $chk->execute(); $chk->store_result();
+        $exists = $chk->num_rows > 0; $chk->close();
+        if ($exists) {
+            mdFlash('danger', "'$code' already exists for that method. Edit the existing row instead.");
+            mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        }
+        /* status column is TINYINT(1); everything else is stored as sent (numeric
+           as string is fine for the DECIMAL/VARCHAR breakpoint columns the app
+           has always written). Nulls are bound via null-safe bind trick. */
+        $ins = $bdsis->prepare(
+            "INSERT INTO ms_ast_table(code, antimicrobial_agent, content, ast_method_id, susceptible, intermediate1, intermediate2, resistance, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        if (!$ins) { mdFlash('danger', 'Database error preparing insert.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $st = (int)$status;
+        $ins->bind_param("ssssssssi", $code, $agent, $content, $mid, $susV, $i1V, $i2V, $resV, $st);
+        $ok = $ins->execute(); $ins->close();
+        mdFlash($ok ? 'success' : 'danger', $ok ? "'$code' added." : 'Insert failed (duplicate code, or DB error).');
+        mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        break;
+
+    case 'update':
+        if ($agent === '') { mdFlash('danger', 'Antimicrobial name is required.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $upd = $bdsis->prepare(
+            "UPDATE ms_ast_table
+                SET antimicrobial_agent=?, content=?, susceptible=?, intermediate1=?, intermediate2=?, resistance=?, status=?
+              WHERE code=? AND ast_method_id=?"
+        );
+        if (!$upd) { mdFlash('danger', 'Database error preparing update.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $st = (int)$status;
+        $upd->bind_param("ssssssiss", $agent, $content, $susV, $i1V, $i2V, $resV, $st, $code, $mid);
+        $ok = $upd->execute();
+        $aff = $upd->affected_rows; $upd->close();
+        if ($ok && $aff > 0) { mdFlash('success', "'$code' updated."); }
+        elseif ($ok)         { mdFlash('info',    "'$code' saved (no changes to write)."); }
+        else                 { mdFlash('danger',  'Update failed.'); }
+        mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        break;
+
+    case 'retire':
+        $q = $bdsis->prepare("UPDATE ms_ast_table SET status=0 WHERE code=? AND ast_method_id=? AND status=1");
+        if (!$q) { mdFlash('danger', 'Database error.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $q->bind_param("ss", $code, $mid);
+        $ok = $q->execute(); $aff = $q->affected_rows; $q->close();
+        mdFlash($ok && $aff>0 ? 'success' : 'warning', $ok && $aff>0 ? "'$code' retired." : "'$code' was already retired or does not exist.");
+        mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        break;
+
+    case 'restore':
+        $q = $bdsis->prepare("UPDATE ms_ast_table SET status=1 WHERE code=? AND ast_method_id=? AND status=0");
+        if (!$q) { mdFlash('danger', 'Database error.'); mdRedirect('antimicrobials.php?m=' . urlencode($mid)); }
+        $q->bind_param("ss", $code, $mid);
+        $ok = $q->execute(); $aff = $q->affected_rows; $q->close();
+        mdFlash($ok && $aff>0 ? 'success' : 'warning', $ok && $aff>0 ? "'$code' restored." : "'$code' was already active or does not exist.");
+        mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        break;
+
+    case 'delete':
+        bdsis_masters_require_delete('antimicrobials');
+
+        /* Dependency validation: check if code is referenced in bacteriology_ast_table or rcdc_ecoli_pcr_ast_table */
+        $bactCnt = mdCountRefs($bdsis, "SELECT COUNT(*) FROM bacteriology_ast_table WHERE antimicrobial_code=?", "s", $code);
+        $pcrCnt  = mdCountRefs($bdsis, "SELECT COUNT(*) FROM rcdc_ecoli_pcr_ast_table WHERE antimicrobial_code=?", "s", $code);
+        $inUseTotal = $bactCnt + $pcrCnt;
+
+        if ($inUseTotal > 0) {
+            $msg = "Cannot delete '$code': still referenced by $bactCnt bacteriology row(s) and $pcrCnt E.coli AST row(s). Retire it instead.";
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('success' => false, 'message' => $msg));
+                exit;
+            }
+            mdFlash('danger', $msg);
+            mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        }
+
+        $del = $bdsis->prepare("DELETE FROM ms_ast_table WHERE code=? AND ast_method_id=?");
+        if (!$del) {
+            $msg = 'Database error preparing delete.';
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('success' => false, 'message' => $msg));
+                exit;
+            }
+            mdFlash('danger', $msg);
+            mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        }
+        $del->bind_param("ss", $code, $mid);
+        $ok = $del->execute();
+        $aff = $del->affected_rows;
+        $del->close();
+
+        if ($ok && $aff > 0) {
+            $msg = "Antimicrobial '$code' deleted successfully.";
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('success' => true, 'message' => $msg));
+                exit;
+            }
+            mdFlash('success', $msg);
+        } elseif ($ok) {
+            $msg = "No antimicrobial '$code' found to delete.";
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('success' => false, 'message' => $msg));
+                exit;
+            }
+            mdFlash('warning', $msg);
+        } else {
+            $msg = 'Delete failed.';
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('success' => false, 'message' => $msg));
+                exit;
+            }
+            mdFlash('danger', $msg);
+        }
+        mdRedirect('antimicrobials.php?m=' . urlencode($mid));
+        break;
+
+    default:
+        mdFlash('danger', 'Unrecognised action.');
+        mdRedirect('antimicrobials.php');
+}

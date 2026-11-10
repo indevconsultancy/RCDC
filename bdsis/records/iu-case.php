@@ -1,0 +1,585 @@
+<?php
+	require_once("../config/session.php");
+	require_once("../config/db-config.php");
+	require_once("../includes/lab-helpers.php");   // bdsis_normalize_date()
+	require_once("../config/commondb-config.php");  // centre lookup for id generation
+	require_once("../includes/rbac.php");
+	bdsis_require_module();   // no writes at all from an unauthorised role
+	$user=$_SESSION["users"];
+	/* commondb's login is shared by ten surveillance systems, so these keys hold
+	   whichever one the user last entered, and are absent altogether when the user
+	   arrived from a system that never wrote them -- "Undefined array key" under
+	   PHP 8. The RCDC intake tests below read $acl/$usercat to decide who may
+	   record a receipt, so reading them from the session let another system's role
+	   answer a BDSIS question. The BDSIS row is the authority. */
+	$me = bdsis_identity(); $cid=$me['centre']; $acl=$me['acl']; $usercat=$me['usercat'];
+
+    $submit = $bdsis -> real_escape_string($_POST['submit']);
+    $action = $bdsis -> real_escape_string($_POST['action']);
+    $errmsg = '';
+    /* null = no handler has decided yet. Deliberately NOT false: the create loop
+       below runs while $check !== false, and the final `if($check)` treats null as
+       failure, so a request matching no handler reports an error rather than a
+       false success. */
+    $check = null;
+    $today = date('Y-m-d');
+    if ($submit=='caseDemography') {
+		bdsis_require_can($action == 1 ? 'add' : 'edit', null, 'records');
+
+        /* CID No. auto-migration (2026-10-08): run the ALTER here too so a
+           POST that arrives before case.php was ever opened (direct submit,
+           test tooling, replayed form) still finds the cid_no column
+           present when the secondary UPDATE below writes to it. Idempotent
+           no-op when the column is already at VARCHAR(50). */
+        if (function_exists('bdsis_subject_cid_no_column_ensure')) {
+            bdsis_subject_cid_no_column_ensure($bdsis);
+        }
+
+        /* subject information */
+        $type="Case";
+        $dohv=bdsis_normalize_date($_POST["dohv"] ?? null);
+        $name=$bdsis->real_escape_string($_POST["cname"]);
+        $gen=$bdsis->real_escape_string($_POST["cgen"]);
+        $age=$bdsis->real_escape_string($_POST["cage"]);
+        $address=$bdsis->real_escape_string($_POST["raddress"]);
+        $district=$bdsis->real_escape_string($_POST["district"]);
+        $occupation=$bdsis->real_escape_string($_POST["occupation"]);
+        $contact=$bdsis->real_escape_string($_POST["cno"]);
+        $categ=$bdsis->real_escape_string($_POST["p_category"]);
+        $null=null;
+
+        /* Case Investigation Form (Rotavirus surveillance) additions. Every one of
+           these is OPTIONAL: a blank post stores NULL, and coded answers are
+           whitelisted so nothing outside the paper form's options is stored. */
+        $optText = function($k, $max = 255) use ($bdsis){ $v = (isset($_POST[$k]) && !is_array($_POST[$k])) ? trim((string)$_POST[$k]) : ''; return ($v === '') ? null : $bdsis->real_escape_string(mb_substr($v, 0, $max)); };
+        $optInt  = function($k){ $v = (isset($_POST[$k]) && !is_array($_POST[$k])) ? trim((string)$_POST[$k]) : ''; return ($v === '' || !is_numeric($v) || (int)$v < 0) ? null : (int)$v; };
+        $optDate = function($k){ return bdsis_normalize_date($_POST[$k] ?? null); };
+        $optPick = function($k, $allowed){ $v = (isset($_POST[$k]) && !is_array($_POST[$k])) ? trim((string)$_POST[$k]) : ''; return in_array($v, $allowed, true) ? $v : null; };
+        $yn = array('Yes', 'No');
+        $regNumber  = $optText('reg_number', 30);
+        $dob        = $optDate('dob');
+        $residence  = $optPick('residence_type', array('Rural', 'Urban'));
+        $guardian   = $optText('guardian_name', 60);
+        $notifiedBy = $optText('notified_by', 60);
+        $notifDate  = $optDate('notification_date');
+        /* CID No. (2026-10-07): optional alphanumeric, independent of the
+           Case Investigation Form sections -- captured for every case
+           (Under-5 or 60+) because it travels with the patient, not with
+           the paper form. bdsis_normalize_cid_no() trims, strips every
+           character that isn't [A-Za-z0-9], caps at 32 chars, and returns
+           NULL when the result is empty, so a blank post stores NULL and
+           no further escaping is needed at the bind site. */
+        $cidNo      = function_exists('bdsis_normalize_cid_no')
+                        ? bdsis_normalize_cid_no($_POST['cid_no'] ?? null)
+                        : null;
+
+
+        /* clinical information */
+        $cs=$bdsis->real_escape_string($_POST["ccli_status"]);		
+        $doio=bdsis_normalize_date($_POST["doio"] ?? null);
+        $chr=$bdsis->real_escape_string($_POST["cstool_char"]);
+        $dur=$bdsis->real_escape_string($_POST["dduration"]);
+        $fc=$bdsis->real_escape_string($_POST["food_consumed"]);
+        if($fc=="Yes"){
+            $fn=$bdsis->real_escape_string($_POST["food_name"]);
+        }
+        else{
+            $fn=null;
+        }
+        $th=$bdsis->real_escape_string($_POST["travel_his"]);
+        if($th=="Yes"){
+            $tp=$bdsis->real_escape_string($_POST["travel_place"]); 
+            $td=bdsis_normalize_date($_POST["travel_date"] ?? null);
+        }
+        else{
+            $tp=null;
+            $td='1900-01-01';
+        }
+
+        /* Hospitalization, syndrome, treatment, immunization history, outcome --
+           the remaining paper-form sections, all optional. Vaccine details are
+           kept only when the vaccine was received. */
+        $admDate     = $optDate('admission_date');
+        $hospName    = $optText('hospital_name', 100);
+        $dischDate   = $optDate('discharge_death_date');
+        $maxDiarr    = $optInt('max_diarrhea_episodes');
+        $dehydration = $optPick('dehydration_degree', array('0', '1', '2', '3', '99'));
+        $symWatery   = $optPick('sym_watery_loose', $yn);
+        $symBloody   = $optPick('sym_bloody', $yn);
+        $symFever    = $optPick('sym_fever', $yn);
+        $symAbdo     = $optPick('sym_abdominal_pain', $yn);
+        $diarAcute   = $optPick('diarrhea_acute', $yn);
+        $diarPersist = $optPick('diarrhea_persistent', $yn);
+        $diarChronic = $optPick('diarrhea_chronic', $yn);
+        $vomiting    = $optPick('vomiting', $yn);
+        $maxVomit    = $optInt('max_vomiting_episodes');
+        $rehydration = null;
+        if(isset($_POST['rehydration']) && is_array($_POST['rehydration'])){
+            $rh = array_values(array_intersect(array('1', '2'), array_map('strval', $_POST['rehydration'])));
+            $rehydration = count($rh) ? implode(',', $rh) : null;
+        }
+        $rotaVaccine = $optPick('rota_vaccine', array('1', '2'));
+        $vaccType    = ($rotaVaccine === '1') ? $optPick('vaccine_type', array('1', '2', '3', 'Others')) : null;
+        $vaccDate    = ($rotaVaccine === '1') ? $optDate('vaccine_last_date') : null;
+        $vaccSource  = ($rotaVaccine === '1') ? $optPick('vaccine_info_source', array('1', '2', '3')) : null;
+        $outcome     = $optPick('outcome', array('Alive', 'Death', 'Referred', '99'));
+
+        /* Under-5 Case Investigation Form gate, re-derived here from the posted
+           age in months -- never trusted from the browser, which only hides the
+           fields. 0-59 months stores the CIF; 60 months and above behaves exactly
+           as the form did before the CIF fields existed.
+
+           An age of 60+ does NOT erase CIF values already captured for the case:
+           the update below simply leaves those columns alone, so correcting an
+           age (or mistyping one) cannot destroy clinical data that was entered
+           while the case was under 5. */
+        $ageMonths = trim((string)($_POST["cage"] ?? ''));
+        $isUnder5  = ($ageMonths !== '' && is_numeric($ageMonths) && (int)$ageMonths < 60);
+
+        if($action == 1){
+            /* Centre is decided by the server, never by the form.
+               A facility user always books the case to their own centre -- the posted
+               facility is ignored, which closes the gap that let one facility create a
+               case attributed to another. National roles may choose, but only from the
+               list bdsis_case_centres() offers (active centres with a center_code),
+               and only a real centre id. */
+            $postedFacility = isset($_POST["facility"]) ? (string)$_POST["facility"] : '';
+            $allowedCentres = bdsis_case_centres($commondb);   // same list the form renders
+
+            if(count($allowedCentres) === 0){
+                $check=false; $ctid='';
+                $errmsg="No participating health facility is assigned to your account's district.";
+            } elseif(count($allowedCentres) === 1){
+                /* Exactly one permitted centre, so the post has nothing to say: the
+                   server picks it. This is what stops one facility booking a case to
+                   another, and it now covers the district officer too -- whose own
+                   centre may be an administrative office with no center_code, which
+                   is why the centre comes from the permitted list and not from
+                   bdsis_user_centre(). */
+                $ctid = (string)key($allowedCentres);
+            } elseif(isset($allowedCentres[$postedFacility])){
+                $ctid = $postedFacility;
+            } else {
+                $check=false; $ctid='';
+                $errmsg="Please choose a participating health facility.";
+            }
+
+            /* Subject ID is generated, never taken from the form. */
+            $sid = ($ctid!=='') ? bdsis_next_subject_id($bdsis, $commondb, $ctid) : null;
+            if($sid===null && $ctid!==''){
+                $check=false; $errmsg="Could not generate a Subject ID for this facility.";
+            }
+            $sid = (string)$sid;
+            /* Insert with retry.
+
+               The generated id is only advisory: two users saving at the same moment
+               can compute the same number. subject_id is the PRIMARY KEY, so the loser's
+               INSERT fails with duplicate-key 1062 -- we then take the next id and try
+               again. That, not the pre-check, is what actually guarantees uniqueness
+               under concurrency.
+
+               Both rows commit together or neither: these used to run as
+               $subjectInfo->execute() && $clinicalInfo->execute(), and && short-circuits,
+               so a failed clinical INSERT still left the subject committed. */
+            $attempt = 0;
+            while($check !== false && $attempt < 25){
+                $attempt++;
+                $bdsis->begin_transaction();
+
+                $subjectInfo = $bdsis->prepare("INSERT INTO subject_information_table(subject_id, center_id, subject_type, hospital_visit_date, subject_name, gender, age, residental_address, dzongkhag_code, occupation_code, contact_no, subject_category, recorded_by, recorded_on, record_updated_on, record_updated_by, reg_number, dob, residence_type, guardian_name, notified_by, notification_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                /* A 60+ case stores no CIF demography, exactly as before. */
+                $sRegNumber  = $isUnder5 ? $regNumber  : null;
+                $sDob        = $isUnder5 ? $dob        : null;
+                $sResidence  = $isUnder5 ? $residence  : null;
+                $sGuardian   = $isUnder5 ? $guardian   : null;
+                $sNotifiedBy = $isUnder5 ? $notifiedBy : null;
+                $sNotifDate  = $isUnder5 ? $notifDate  : null;
+                $subjectInfo->bind_param("ssssssisssisssssssssss", $sid, $ctid, $type, $dohv, $name, $gen, $age, $address, $district, $occupation, $contact, $categ, $user, $today, $today, $null, $sRegNumber, $sDob, $sResidence, $sGuardian, $sNotifiedBy, $sNotifDate);
+
+                /* PHP 8's mysqli reports errors as exceptions by default, so a failed
+                   execute() throws rather than returning false -- the duplicate-key retry
+                   has to catch, not test a return value. */
+                $insertFailed = false; $dupe = false;
+                try {
+                    if(!$subjectInfo->execute()){ $insertFailed = true; $dupe = ($bdsis->errno == 1062); }
+                } catch (mysqli_sql_exception $e) {
+                    $insertFailed = true;
+                    $dupe = ($e->getCode() == 1062);
+                }
+                if($insertFailed){
+                    $subjectInfo->close();
+                    $bdsis->rollback();
+                    if($dupe){
+                        /* Someone else took this id between generation and insert. */
+                        $sid = (string)bdsis_next_subject_id($bdsis, $commondb, $ctid);
+                        if($sid === ''){ $check=false; $errmsg="Could not allocate a Subject ID."; break; }
+                        continue;
+                    }
+                    $check = false;
+                    $errmsg = "The case could not be saved. Please check the details are complete and valid, then try again.";
+                    break;
+                }
+
+                $clinicalInfo = $bdsis->prepare("INSERT INTO case_clinical_information_table(subject_id, clinic_visit_status, date_illness_onset, stool_charateristices, diarrhea_duration, food_suspect_status, food_suspect_name, travel_history_status, travel_place, travel_date,
+                        admission_date, hospital_name, discharge_death_date, max_diarrhea_episodes, dehydration_degree, sym_watery_loose, sym_bloody, sym_fever, sym_abdominal_pain, diarrhea_acute, diarrhea_persistent, diarrhea_chronic, vomiting, max_vomiting_episodes, rehydration, rota_vaccine, vaccine_type, vaccine_last_date, vaccine_info_source, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                /* A 60+ case stores no CIF clinical detail, exactly as before. */
+                if(!$isUnder5){
+                    $admDate = $hospName = $dischDate = $maxDiarr = $dehydration = null;
+                    $symWatery = $symBloody = $symFever = $symAbdo = null;
+                    $diarAcute = $diarPersist = $diarChronic = $vomiting = $maxVomit = null;
+                    $rehydration = $rotaVaccine = $vaccType = $vaccDate = $vaccSource = $outcome = null;
+                }
+                $clinicalInfo->bind_param("ssssisssss" . "sssisssssssssissssss", $sid, $cs, $doio, $chr, $dur, $fc, $fn, $th, $tp, $td,
+                        $admDate, $hospName, $dischDate, $maxDiarr, $dehydration, $symWatery, $symBloody, $symFever, $symAbdo, $diarAcute, $diarPersist, $diarChronic, $vomiting, $maxVomit, $rehydration, $rotaVaccine, $vaccType, $vaccDate, $vaccSource, $outcome);
+
+                $clinicalOk = false;
+                try { $clinicalOk = (bool)$clinicalInfo->execute(); }
+                catch (mysqli_sql_exception $e) { $clinicalOk = false; }
+                if($clinicalOk){
+                    /* CID No. (2026-10-07): second write inside the same
+                       transaction so the row commits with cid_no set, or
+                       nothing commits at all. Gated on the column probe
+                       so a database without the ALTER applied just skips
+                       the UPDATE and continues with the standard commit. */
+                    if (function_exists('bdsis_subject_cid_no_column_exists') && bdsis_subject_cid_no_column_exists($bdsis)) {
+                        try {
+                            $cidQ = $bdsis->prepare("UPDATE subject_information_table SET cid_no=? WHERE subject_id=?");
+                            if ($cidQ) { $cidQ->bind_param('ss', $cidNo, $sid); $cidQ->execute(); $cidQ->close(); }
+                        } catch (mysqli_sql_exception $e) { /* CID No. is optional; a transient failure must not undo the save. */ }
+                    }
+                    $bdsis->commit();
+                    $subjectInfo->close();
+                    $clinicalInfo->close();
+                    $check = true;
+                } else {
+                    $subjectInfo->close();
+                    $clinicalInfo->close();
+                    $bdsis->rollback();
+                    $check = false;
+                    $errmsg = "The case could not be saved. Please check the details are complete and valid, then try again.";
+                }
+                break;
+            }
+            if($check !== true && $errmsg === ''){
+                $check = false;
+                $errmsg = "Could not allocate a unique Subject ID. Please try again.";
+            }
+        }
+        elseif($action == 2){
+            $sid=$bdsis->real_escape_string($_POST["cid"]);
+            /* Authorise the target record before writing. The form hides what a user
+               may not edit, but the endpoint is reachable directly. */
+            bdsis_require_subject($bdsis, $sid);
+
+            /* Under 5: the CIF demography columns are written too. 60+: they are
+               left out of the statement entirely, so the update behaves exactly
+               as it did before the CIF work AND anything captured earlier for
+               this case survives an age correction. */
+            if($isUnder5){
+                $subjectInfoqry = $bdsis->prepare("UPDATE subject_information_table SET subject_type=?, hospital_visit_date=?, subject_name=?, gender=?, age=?, residental_address=?, dzongkhag_code=?, occupation_code=?, contact_no=?, subject_category=?, record_updated_on=?, record_updated_by=?, reg_number=?, dob=?, residence_type=?, guardian_name=?, notified_by=?, notification_date=? WHERE subject_id=?");
+                $subjectInfoqry->bind_param("ssssisssisssssssss" . "s", $type, $dohv, $name, $gen, $age, $address, $district, $occupation, $contact, $categ, $today, $user, $regNumber, $dob, $residence, $guardian, $notifiedBy, $notifDate, $sid);
+            }else{
+                $subjectInfoqry = $bdsis->prepare("UPDATE subject_information_table SET subject_type=?, hospital_visit_date=?, subject_name=?, gender=?, age=?, residental_address=?, dzongkhag_code=?, occupation_code=?, contact_no=?, subject_category=?, record_updated_on=?, record_updated_by=? WHERE subject_id=?");
+                $subjectInfoqry->bind_param("ssssisssissss", $type, $dohv, $name, $gen, $age, $address, $district, $occupation, $contact, $categ, $today, $user, $sid);
+            }
+
+            /* Upsert, not UPDATE. 26 legacy subjects have no clinical row (the old
+               non-atomic Step 1 could commit the subject and lose the clinical
+               insert). A plain UPDATE matches zero rows for those and reports
+               success, so their clinical details could never be entered. subject_id
+               is the primary key here, so ON DUPLICATE KEY UPDATE repairs an
+               orphan on first save and behaves exactly as before otherwise.
+
+               The upsert is also what stops a second Under-5 CIF record being
+               created for a case: subject_id is the primary key, so re-saving a
+               case that already has CIF data updates that one row in place. */
+            if($isUnder5){
+            $clinicalInfoqry = $bdsis->prepare("INSERT INTO case_clinical_information_table
+                  (subject_id, clinic_visit_status, date_illness_onset, stool_charateristices, diarrhea_duration,
+                   food_suspect_status, food_suspect_name, travel_history_status, travel_place, travel_date,
+                   admission_date, hospital_name, discharge_death_date, max_diarrhea_episodes, dehydration_degree,
+                   sym_watery_loose, sym_bloody, sym_fever, sym_abdominal_pain, diarrhea_acute, diarrhea_persistent,
+                   diarrhea_chronic, vomiting, max_vomiting_episodes, rehydration, rota_vaccine, vaccine_type,
+                   vaccine_last_date, vaccine_info_source, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                  clinic_visit_status=VALUES(clinic_visit_status), date_illness_onset=VALUES(date_illness_onset),
+                  stool_charateristices=VALUES(stool_charateristices), diarrhea_duration=VALUES(diarrhea_duration),
+                  food_suspect_status=VALUES(food_suspect_status), food_suspect_name=VALUES(food_suspect_name),
+                  travel_history_status=VALUES(travel_history_status), travel_place=VALUES(travel_place),
+                  travel_date=VALUES(travel_date),
+                  admission_date=VALUES(admission_date), hospital_name=VALUES(hospital_name),
+                  discharge_death_date=VALUES(discharge_death_date), max_diarrhea_episodes=VALUES(max_diarrhea_episodes),
+                  dehydration_degree=VALUES(dehydration_degree), sym_watery_loose=VALUES(sym_watery_loose),
+                  sym_bloody=VALUES(sym_bloody), sym_fever=VALUES(sym_fever), sym_abdominal_pain=VALUES(sym_abdominal_pain),
+                  diarrhea_acute=VALUES(diarrhea_acute), diarrhea_persistent=VALUES(diarrhea_persistent),
+                  diarrhea_chronic=VALUES(diarrhea_chronic), vomiting=VALUES(vomiting),
+                  max_vomiting_episodes=VALUES(max_vomiting_episodes), rehydration=VALUES(rehydration),
+                  rota_vaccine=VALUES(rota_vaccine), vaccine_type=VALUES(vaccine_type),
+                  vaccine_last_date=VALUES(vaccine_last_date), vaccine_info_source=VALUES(vaccine_info_source),
+                  outcome=VALUES(outcome)");
+            $clinicalInfoqry->bind_param("ssssisssss" . "sssisssssssssissssss", $sid, $cs, $doio, $chr, $dur, $fc, $fn, $th, $tp, $td,
+                        $admDate, $hospName, $dischDate, $maxDiarr, $dehydration, $symWatery, $symBloody, $symFever, $symAbdo, $diarAcute, $diarPersist, $diarChronic, $vomiting, $maxVomit, $rehydration, $rotaVaccine, $vaccType, $vaccDate, $vaccSource, $outcome);
+            }else{
+                /* 60+: the original ten-column upsert, unchanged. CIF columns are
+                   not named at all, so existing values are preserved. */
+                $clinicalInfoqry = $bdsis->prepare("INSERT INTO case_clinical_information_table
+                      (subject_id, clinic_visit_status, date_illness_onset, stool_charateristices, diarrhea_duration,
+                       food_suspect_status, food_suspect_name, travel_history_status, travel_place, travel_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                      clinic_visit_status=VALUES(clinic_visit_status), date_illness_onset=VALUES(date_illness_onset),
+                      stool_charateristices=VALUES(stool_charateristices), diarrhea_duration=VALUES(diarrhea_duration),
+                      food_suspect_status=VALUES(food_suspect_status), food_suspect_name=VALUES(food_suspect_name),
+                      travel_history_status=VALUES(travel_history_status), travel_place=VALUES(travel_place),
+                      travel_date=VALUES(travel_date)");
+                $clinicalInfoqry->bind_param("ssssisssss", $sid, $cs, $doio, $chr, $dur, $fc, $fn, $th, $tp, $td);
+            }
+            
+            if($subjectInfoqry->execute() && $clinicalInfoqry->execute()){
+                $subjectInfoqry->close();
+                $clinicalInfoqry->close();
+                /* CID No. (2026-10-07): second write issued unconditionally
+                   (even for 60+ cases) so clearing the field persists as
+                   NULL. $cidNo was normalised to NULL or a trimmed
+                   alphanumeric at the top of the handler. Gated on the
+                   column probe so a database without the ALTER just skips
+                   the write. */
+                if (function_exists('bdsis_subject_cid_no_column_exists') && bdsis_subject_cid_no_column_exists($bdsis)) {
+                    try {
+                        $cidQ = $bdsis->prepare("UPDATE subject_information_table SET cid_no=? WHERE subject_id=?");
+                        if ($cidQ) { $cidQ->bind_param('ss', $cidNo, $sid); $cidQ->execute(); $cidQ->close(); }
+                    } catch (mysqli_sql_exception $e) { /* CID No. is optional; a transient failure must not undo the main save. */ }
+                }
+                $check = true;
+            }   else $check = false;
+        }
+        else{}        
+    }
+
+    if ($submit=='sampleShipment') {
+        $sid=$bdsis->real_escape_string($_POST["sid"]);
+		bdsis_require_subject($bdsis, $sid);
+		bdsis_require_can($action == 3 ? 'add' : 'edit', null, 'records');
+        /* Free-text personnel names. NOT escaped: both values are bound into the
+           prepared statements below, and real_escape_string() on top of that
+           stored the backslash literally -- harmless while these were usernames,
+           but it would write "O\'Brien" now that the name is typed in. Trimmed so
+           a space-only entry is caught by the empty check below. */
+        $colby=trim((string)($_POST["ccby"] ?? ''));
+        $coldate=bdsis_normalize_date($_POST["doc"] ?? null);
+        $shippedby=trim((string)($_POST["shipby"] ?? ''));
+        $shipdate=bdsis_normalize_date($_POST["dos"] ?? null);
+
+        /* Guard the two columns the schema will not accept empty: collected_by
+           and collection_date are both NOT NULL. An empty value for either used
+           to reach the INSERT and raise an uncaught mysqli exception -- PHP 8
+           throws by default -- which killed the endpoint before it could answer.
+           The AJAX caller then received no JSON at all, so the form appeared to
+           do nothing and no record was created. Refusing here returns the normal
+           "Submission Failed" JSON with a reason instead. */
+        $shipError = '';
+        if($colby===''){ $shipError = 'Please enter who collected the sample.'; }
+        elseif($coldate===null){ $shipError = 'Please enter a valid Date of collection.'; }
+
+        /* Optional people are stored as NULL, never as an empty string, so
+           "not recorded" stays distinguishable from "recorded as blank". */
+        if($shippedby===''){ $shippedby = null; }
+
+        if ($shipError !== '') {
+            $check = false;
+            $errmsg = $shipError;
+        }
+        elseif ($action==3) {
+            $chkqry=$bdsis->query("SELECT subject_id FROM sample_information_table WHERE subject_id='".$sid."'");
+            $chk=$chkqry->num_rows;
+            if($chk==0){
+                /* First save of a subject's Sample Information row. The Sample
+                   Information (RCDC) card was removed from case.php, so the
+                   POST no longer carries receiveby / dosr / ssts / dtls. This
+                   INSERT now only touches the shipment columns; the four
+                   receipt columns (receive_by, receive_date, sample_status,
+                   status_details) fall back to their schema defaults (NULL),
+                   which matches "no receipt recorded yet". Historical rows
+                   already in the table are UNCHANGED -- this branch only runs
+                   when no row exists for the subject. */
+                $sampleInsertQry = $bdsis->prepare("INSERT INTO sample_information_table(subject_id, collected_by, collection_date, shipment_by, shipment_date, record_created_on) VALUES (?, ?, ?, ?, ?, ?)");
+                $sampleInsertQry->bind_param("ssssss", $sid, $colby, $coldate, $shippedby, $shipdate, $today);
+
+                if($sampleInsertQry->execute()){
+                    $sampleInsertQry->close();
+                    $check = true;
+                }   else $check = false;
+            }else{
+                /* Sample information already exists for this case (a repeated
+                   submit, or a second tab). Say so instead of failing blankly. */
+                $check = false;
+                $errmsg = 'Sample information already exists for this case. Reopen the case to edit it.';
+            }
+        }
+        elseif ($action==2) {
+            /* Sample Information (RCDC) card was removed from case.php, so
+               the POST no longer carries receiveby / dosr / ssts / dtls. The
+               UPDATE below deliberately does NOT include the four receipt
+               columns (receive_by, receive_date, sample_status,
+               status_details), so any historical values already in
+               sample_information_table survive the save. The role branch that
+               used to split RCDC-writers from facility-writers is gone -- both
+               paths now issue the same shipment-only UPDATE, matching what
+               the facility branch has always done. */
+            $sampleUpdate = $bdsis->prepare("UPDATE sample_information_table SET collected_by=?, collection_date=?, shipment_by=?, shipment_date=?, record_created_on=? WHERE subject_id=?");
+            $sampleUpdate->bind_param("ssssss", $colby, $coldate, $shippedby, $shipdate, $today, $sid);
+
+            if($sampleUpdate->execute()){
+                $sampleUpdate->close();
+                $check = true;
+            }   else $check = false;
+        }
+        else{}        
+    }
+
+    if ($submit=='microscopyResult') {
+        $sid=$bdsis->real_escape_string($_POST["sid"]);
+		bdsis_require_subject($bdsis, $sid);
+		bdsis_require_can($action == 3 ? 'add' : 'edit', null, 'records');
+        $color=$bdsis->real_escape_string($_POST["color"]);
+        $mucus=$bdsis->real_escape_string($_POST["mucus"]);
+        $blood=$bdsis->real_escape_string($_POST["blood"]);
+        $wbc=$bdsis->real_escape_string($_POST["wbc"]);
+        $rbc=$bdsis->real_escape_string($_POST["rbc"]);
+        $ovc=$bdsis->real_escape_string($_POST["ovc"]);
+        $oth=$bdsis->real_escape_string($_POST["oth"]);
+        $aliquots=$bdsis->real_escape_string($_POST["aliquot"]);
+        if($oth=="1"){$other=$bdsis->real_escape_string($_POST["others"]);}	else{$other=null;}
+        /* Free text, bound into the prepared statements below -- see the note on
+           "Sample Collected by" in the sampleShipment branch for why it is not
+           escaped as well. */
+        $proby=trim((string)($_POST["proby"] ?? ''));
+        $prodate=bdsis_normalize_date($_POST["prodate"] ?? null);
+
+        /* Stool R/E additions from the Case Investigation Form -- optional,
+           whitelisted, NULL when blank. */
+        $mPick = function($k, $allowed){ $v = (isset($_POST[$k]) && !is_array($_POST[$k])) ? trim((string)$_POST[$k]) : ''; return in_array($v, $allowed, true) ? $v : null; };
+        $qtyAdequate = $mPick('quantity_adequate', array('Yes', 'No'));
+        $consistency = $mPick('consistency', array('Watery/Loose', 'Formed'));
+        $aliquotMcb  = $mPick('aliquot_mcb', array('1', '0'));
+        $aliquotMcb  = ($aliquotMcb === null) ? null : (int)$aliquotMcb;
+
+        /* Under-5 gate, re-derived from the subject's stored age in months (this
+           step does not post an age). A 60+ case stores no CIF laboratory
+           detail, exactly as before the CIF fields existed. */
+        $micIsU5 = false;
+        $micAgeQ = $bdsis->query("SELECT age FROM subject_information_table WHERE subject_id='".$sid."'");
+        if($micAgeQ && $micAgeQ->num_rows){
+            list($micAge) = $micAgeQ->fetch_row();
+            $micIsU5 = ($micAge !== null && $micAge !== '' && (int)$micAge < 60);
+        }
+        if(!$micIsU5){ $qtyAdequate = $consistency = $aliquotMcb = null; }
+
+        if ($action == 4) {
+            $chkqry = $bdsis->query("SELECT subject_id FROM microscopy_result_table WHERE subject_id='".$sid."'");
+            $chk = $chkqry->num_rows;
+            if($chk==0){
+                $microscopyInsertQry = $bdsis->prepare("INSERT INTO microscopy_result_table(subject_id, color, mucus, blood, wbc, rbc, ova_cyst, others, aliquots, processed_by, processed_on, quantity_adequate, consistency, aliquot_mcb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $microscopyInsertQry->bind_param("ssssssssissssi", $sid, $color, $mucus, $blood, $wbc, $rbc, $ovc, $other, $aliquots, $proby, $prodate, $qtyAdequate, $consistency, $aliquotMcb);
+                
+                if($microscopyInsertQry->execute()){
+                    $microscopyInsertQry->close();
+                    $check = true; 
+                }   else $check = false;
+            }else $check = false;
+        }
+        elseif ($action == 2) {
+            
+            $microscopyUpdateQry = $bdsis->prepare("UPDATE microscopy_result_table SET color=?, mucus=?, blood=?, wbc=?, rbc=?, ova_cyst=?, others=?, aliquots=?, processed_by=?, processed_on=?, quantity_adequate=?, consistency=?, aliquot_mcb=? WHERE subject_id=?");
+            $microscopyUpdateQry->bind_param("sssssssissssis", $color, $mucus, $blood, $wbc, $rbc, $ovc, $other, $aliquots, $proby, $prodate, $qtyAdequate, $consistency, $aliquotMcb, $sid);
+            if($microscopyUpdateQry->execute()){
+                $microscopyUpdateQry->close();
+                $check = true; 
+            }  else $check = false;
+        }
+    }
+
+    // After each step's save, advance the wizard to the next step.
+    // Wizard order (matches case.php $wsteps):
+    //   1 Case Details -> 2 Microscopy Result -> 3 Sample Shipment -> 4 Preview.
+    if ($submit == 'caseDemography')      $nextStep = 2;   // → Microscopy Result
+    elseif ($submit == 'microscopyResult')$nextStep = 3;   // → Sample Shipment
+    elseif ($submit == 'sampleShipment')  $nextStep = 4;   // → Preview
+    else                                  $nextStep = 1;
+
+    /* Where to send the browser afterwards.
+
+       On success, advance to the next step. On failure the record may not exist
+       -- a new case whose INSERT was rejected never got created -- and sending
+       the browser to case.php?action=2&sid=... for a row that was never written
+       is exactly what produced the "array offset on value of type null" wave.
+       So a failed NEW case returns to the blank form; a failed update stays on
+       the step being edited, where the record genuinely does exist. */
+    $sid = isset($sid) ? $sid : '';
+    if ($check) {
+        $lnk = "case.php?action=2&sid=$sid&step=$nextStep";
+    } elseif ($submit == 'caseDemography' && $action == 1) {
+        $lnk = "case.php?action=1";
+    } elseif ($sid !== '') {
+        $lnk = "case.php?action=2&sid=$sid&step=" . max(1, $nextStep - 1);
+    } else {
+        $lnk = "record-management.php";
+    }
+
+    /* Page assets (jQuery + SweetAlert2 for the result popup) load only after every
+       authorisation guard above has passed. Loaded at the top -- as they were --
+       they sent the response body first, so a refused write (an unauthorised role,
+       or another facility's case reached by editing cid) arrived as HTTP 200 with a
+       denial message in the body instead of a true 403. The write itself was always
+       blocked; only the status code was wrong. Same reordering as lab/iu-lab.php. */
+    /* AJAX submit: the form posts in the background so the user never sees this
+       processing page. Return the same message text and target as JSON; $check,
+       $errmsg and $lnk are computed exactly as before, and a non-AJAX request
+       still gets the SweetAlert + redirect page below, so validation, the wizard
+       workflow and the message text are unchanged -- only the response format
+       differs for the in-place caller. */
+    if (strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array(
+            'ok'  => (bool)$check,
+            'msg' => ($check ? 'Submitted Successfully!! ' : 'Submission Failed!! ') . $errmsg,
+            'lnk' => $lnk,
+        ));
+        exit;
+    }
+
+    require_once("../includes/css-jquery.php");
+
+    echo("<input type='hidden' name='lnk' id='lnk' value='$lnk'/>");
+
+    if($check){
+        $bdsis->close();
+?>
+	<script>
+		$(function() {
+			var lnk = $('#lnk').val();
+			Swal.fire({
+				icon: 'success',
+				confirmButtonText: 'Close',
+				text: 'Submitted Successfully!! <?=$errmsg;?>',
+				showCloseButton: true
+			})
+			.then(function (result) { window.location = lnk; })
+		});
+	</script>		
+	<?php }	else { /* echo $bdsis->error; */?>
+	<script>
+		$(function() {
+			var lnk = $('#lnk').val();
+			Swal.fire({
+				icon: 'error',
+				confirmButtonText: 'Close',
+				text: 'Submission Failed!! <?=$errmsg;?>',
+				showCloseButton: true
+			})
+			.then(function (result) { window.location = lnk; })
+		});
+	</script>
+<?php } ?>

@@ -1,0 +1,6 @@
+[2026-10-12 16:11:53] [dispatch] reg 4742 background worker unavailable (no PHP CLI binary found) - sending inline
+[2026-10-12 16:11:58] [final-outcome] reg 4742: no active BFDA/DRA user is linked to this sample (entryUser=administrator, collectID=002, siteID=002) - falling back to the configured focal address(es) -> anupampal1307@gmail.com
+[2026-10-12 16:12:02] [final-outcome] TRANSACTION SUCCESS | record=reg 4742 / NMPTL/BUM/2026/2 | type=Official Final Outcome [Complies] | attempted=1 [anupampal1307@gmail.com] | delivered=1 | failed=0 | transport=smtp | attempts=1 | at=2026-10-12 16:12:02 | ref=MPQMS-FO-4742-20261012161158
+[2026-10-12 16:12:46] [dispatch] reg 4742 background worker unavailable (no PHP CLI binary found) - sending inline
+[2026-10-12 16:12:46] [final-outcome] reg 4742: no active BFDA/DRA user is linked to this sample (entryUser=administrator, collectID=002, siteID=002) - falling back to the configured focal address(es) -> anupampal1307@gmail.com
+[2026-10-12 16:12:46] [final-outcome] reg 4742 -> anupampal1307@gmail.com: official outcome already reported, skipped

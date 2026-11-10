@@ -1,0 +1,516 @@
+<?php
+/* Highcharts and jQuery are loaded by the parent page (includes/highcharts.php
+   and includes/css-jquery.php). This file used to re-request them from
+   /highcharts/code/..., a path that does not exist on this server -- four 404s
+   on every dashboard load, including a second copy of jQuery that would have
+   re-initialised over the plugins had it actually resolved. */
+?>
+<?php
+require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/session.php");
+require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/commondb-config.php");
+require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/db-config.php");
+require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/includes/rbac.php");
+bdsis_require_module();
+
+/* This file is included by dashboard.php, but nothing stopped it being requested
+   on its own -- and on its own it answered anybody, with no session at all, with
+   the whole national picture: cases per hospital per month, positivity, AMR.
+   Hence the session and the module gate above.
+
+   Every query below is then restricted to the centres the caller may see. The
+   fragments come from bdsis_scope_clause() so this screen cannot drift from the
+   rule the listings and reports use; for a national role they are empty strings
+   and the SQL is exactly what it was. The subject table is aliased differently
+   from query to query, hence one fragment per alias. */
+$SCOPE    = bdsis_scope_clause($bdsis, "center_id");      // subject table, unaliased
+$SCOPE_SU = bdsis_scope_clause($bdsis, "su.center_id");
+$SCOPE_S  = bdsis_scope_clause($bdsis, "s.center_id");
+
+/* ---------------- Year selection ---------------- */
+$ly = $bdsis->query("SELECT MAX(YEAR(hospital_visit_date)) FROM subject_information_table
+                     WHERE YEAR(hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE");
+list($latestYear) = $ly->fetch_row();
+$latestYear = $latestYear ?: date('Y');
+$year = (isset($_POST["col_year"]) && $_POST["col_year"] !== "") ? (int)$_POST["col_year"] : (int)$latestYear;
+$prev = $year - 1;
+
+$CASE = "subject_category IN ('1','2')";                  // diarrhoea cases
+$NEGATIVE = "('101','999','025','026')";                  // negatives + commensal E.coli
+
+/* ---------------- Overview statistics ---------------- */
+$casesYr  = (int)$bdsis->query("SELECT COUNT(*) FROM subject_information_table WHERE YEAR(hospital_visit_date)=$year AND $CASE $SCOPE")->fetch_row()[0];
+$casesPrev= (int)$bdsis->query("SELECT COUNT(*) FROM subject_information_table WHERE YEAR(hospital_visit_date)=$prev AND $CASE $SCOPE")->fetch_row()[0];
+$samplesYr= (int)$bdsis->query("SELECT COUNT(*) FROM sample_information_table s JOIN subject_information_table su ON s.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$labYr    = (int)$bdsis->query("SELECT COUNT(DISTINCT b.subject_id) FROM bacteriology_result_table2 b JOIN subject_information_table su ON b.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$posYr    = (int)$bdsis->query("SELECT COUNT(DISTINCT b.subject_id) FROM bacteriology_result_table2 b JOIN subject_information_table su ON b.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU AND b.pathogen_id NOT IN $NEGATIVE")->fetch_row()[0];
+$sites    = (int)$bdsis->query("SELECT COUNT(*) FROM rcdc_commondb.ms_health_center_table WHERE dsis=1 $SCOPE")->fetch_row()[0];
+$posRate  = $labYr > 0 ? round($posYr * 100 / $labYr, 1) : 0;
+$caseDelta= $casesPrev > 0 ? round(($casesYr - $casesPrev) * 100 / $casesPrev, 1) : 0;
+
+/* ---------------- Incidence trend + outbreak threshold ---------------- */
+$mThis = array_fill(1, 12, 0); $mPrev = array_fill(1, 12, 0);
+$tr = $bdsis->query("SELECT YEAR(hospital_visit_date) y, MONTH(hospital_visit_date) m, COUNT(*) c
+                     FROM subject_information_table WHERE YEAR(hospital_visit_date) IN ($year,$prev) AND $CASE $SCOPE GROUP BY y,m");
+while ($r = $tr->fetch_row()) { if ((int)$r[0]==$year) $mThis[(int)$r[1]]=(int)$r[2]; else $mPrev[(int)$r[1]]=(int)$r[2]; }
+$vals = array_values($mThis); $n = count($vals); $mean = array_sum($vals)/$n;
+$sd = 0; foreach ($vals as $v) $sd += ($v-$mean)*($v-$mean); $sd = sqrt($sd/$n);
+$threshold = round($mean + 2*$sd, 1);                     // simple outbreak-alert threshold
+$outbreak = array(); foreach ($vals as $idx=>$v) if ($v > $threshold && $threshold>0) $outbreak[] = array('x'=>$idx,'y'=>$v);
+$trendThis = json_encode($vals); $trendPrev = json_encode(array_values($mPrev)); $outbreakJ = json_encode($outbreak);
+
+/* ---------------- Pathogen prevalence ---------------- */
+$prevCat=array(); $prevVal=array();
+$pq = $bdsis->query("SELECT p.enteric_pathogen, COUNT(*) c FROM bacteriology_result_table2 b
+                     JOIN subject_information_table su ON b.subject_id=su.subject_id
+                     LEFT JOIN ms_enteric_bacterial_pathogen_table p ON b.pathogen_id=p.pathogen_id
+                     WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU AND b.pathogen_id NOT IN $NEGATIVE
+                     GROUP BY b.pathogen_id ORDER BY c DESC LIMIT 10");
+while ($r=$pq->fetch_row()){ $prevCat[]=$r[0]?:'Unspecified'; $prevVal[]=(int)$r[1]; }
+$prevCatJ=json_encode($prevCat); $prevValJ=json_encode($prevVal);
+
+/* ---------------- Segmentation: diagnostic-method utilisation & yield ---------------- */
+$mTested=array(); $mPos=array();
+$mTested['Culture/AST'] = (int)$bdsis->query("SELECT COUNT(DISTINCT b.subject_id) FROM bacteriology_result_table2 b JOIN subject_information_table su ON b.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$mPos['Culture/AST'] = $posYr; // subjects with a real pathogen isolated
+$mTested['ELISA'] = (int)$bdsis->query("SELECT COUNT(DISTINCT e.subject_id) FROM rcdc_elisa_result_table2 e JOIN subject_information_table su ON e.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$mPos['ELISA'] = (int)$bdsis->query("SELECT COUNT(DISTINCT e.subject_id) FROM rcdc_elisa_result_table2 e JOIN subject_information_table su ON e.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU AND e.elisa_result='Positive'")->fetch_row()[0];
+$mTested['E. coli PCR'] = (int)$bdsis->query("SELECT COUNT(DISTINCT p.subject_id) FROM rcdc_ecoli_pcr_result_table2 p JOIN subject_information_table su ON p.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$pcrPos = (int)$bdsis->query("SELECT COUNT(DISTINCT p.subject_id) FROM rcdc_ecoli_pcr_result_table2 p JOIN subject_information_table su ON p.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU AND p.ecoli_strain_result='Positive'")->fetch_row()[0];
+$mPos['E. coli PCR'] = $pcrPos;
+$mTested['Microscopy'] = (int)$bdsis->query("SELECT COUNT(DISTINCT m.subject_id) FROM microscopy_result_table m JOIN subject_information_table su ON m.subject_id=su.subject_id WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU")->fetch_row()[0];
+$mPos['Microscopy'] = null; // free-text ova/cyst field is not standardised — positivity not derived
+$methCat = array_keys($mTested);
+$methTestedJ = json_encode(array_values($mTested));
+$methPosJ = json_encode(array_values($mPos));
+
+/* ---------------- Segmentation: pathogens detected, by method ---------------- */
+// Bacterial = reuse $prevCat/$prevVal (culture isolates).  Viral/antigen = ELISA positives by virus.
+$elisaCat=array(); $elisaVal=array();
+$eq = $bdsis->query("SELECT v.virus, COUNT(DISTINCT e.subject_id) c
+                     FROM rcdc_elisa_result_table2 e
+                     JOIN subject_information_table su ON e.subject_id=su.subject_id
+                     LEFT JOIN ms_virus_table v ON e.virus_id=v.virus_id
+                     WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU AND e.elisa_result='Positive'
+                     GROUP BY e.virus_id ORDER BY c DESC");
+while ($r=$eq->fetch_row()){ $elisaCat[]=$r[0]?:'Unspecified'; $elisaVal[]=(int)$r[1]; }
+$nb=count($prevCat); $nv=count($elisaCat);
+$segCats = array_merge($prevCat, $elisaCat, array('Diarrhoeagenic E. coli (PCR)'));
+$segBact  = array_merge($prevVal, array_fill(0,$nv,0), array(0));
+$segElisa = array_merge(array_fill(0,$nb,0), $elisaVal, array(0));
+$segPcr   = array_merge(array_fill(0,$nb,0), array_fill(0,$nv,0), array($pcrPos));
+$segCatsJ=json_encode($segCats); $segBactJ=json_encode($segBact); $segElisaJ=json_encode($segElisa); $segPcrJ=json_encode($segPcr);
+
+/* ---------------- Geographic distribution (by dzongkhag) ---------------- */
+$geoCat=array(); $geoVal=array();
+$gq2 = $bdsis->query("SELECT COALESCE(d.dzongkhag_name,'Unknown') nm, COUNT(*) c
+                      FROM subject_information_table s
+                      LEFT JOIN rcdc_commondb.ms_dzongkhag_table d ON s.dzongkhag_code=d.dzongkhag_code
+                      WHERE YEAR(s.hospital_visit_date)=$year AND $CASE $SCOPE_S
+                      GROUP BY s.dzongkhag_code ORDER BY c DESC LIMIT 20");
+while ($r=$gq2->fetch_row()){ $geoCat[]=$r[0]; $geoVal[]=(int)$r[1]; }
+$geoCatJ=json_encode($geoCat); $geoValJ=json_encode($geoVal);
+
+/* ---------------- Age group x sex (where age recorded) ---------------- */
+$ageGroups = array('<1','1-4','5-14','15-24','25-44','45-64','65+');
+$ageM = array_fill_keys($ageGroups,0); $ageF = array_fill_keys($ageGroups,0);
+$aq = $bdsis->query("SELECT CASE WHEN age<1 THEN '<1' WHEN age<5 THEN '1-4' WHEN age<15 THEN '5-14'
+                       WHEN age<25 THEN '15-24' WHEN age<45 THEN '25-44' WHEN age<65 THEN '45-64' ELSE '65+' END grp,
+                       gender, COUNT(*) c
+                     FROM subject_information_table
+                     WHERE YEAR(hospital_visit_date)=$year AND $CASE $SCOPE AND age BETWEEN 0 AND 100
+                     GROUP BY grp, gender");
+$ageKnown=0;
+while ($r=$aq->fetch_row()){ $g=$r[0]; $ageKnown+=(int)$r[2];
+    if (stripos($r[1],'F')===0) $ageF[$g]=(int)$r[2]; else $ageM[$g]=(int)$r[2]; }
+$ageMJ=json_encode(array_values($ageM)); $ageFJ=json_encode(array_values($ageF));
+$ageGroupsJ=json_encode($ageGroups);
+
+/* ---------------- Year-on-year totals ---------------- */
+$yoyCat=array(); $yoyData=array();
+$yq2 = $bdsis->query("SELECT YEAR(hospital_visit_date) y, COUNT(*) c FROM subject_information_table
+                      WHERE YEAR(hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) AND $CASE $SCOPE GROUP BY y ORDER BY y");
+while ($r=$yq2->fetch_row()){ $yy=(int)$r[0]; $yoyCat[]=$yy;
+    $yoyData[] = array('y'=>(int)$r[1], 'color'=>($yy==$year?'#17a2b8':'#90c6d6')); }
+$yoyCatJ=json_encode($yoyCat); $yoyDataJ=json_encode($yoyData);
+
+/* ---------------- Seasonality (avg cases / month across years) ---------------- */
+$seas = array_fill(1,12,0);
+$sq2 = $bdsis->query("SELECT MONTH(hospital_visit_date) m, ROUND(COUNT(*)/COUNT(DISTINCT YEAR(hospital_visit_date)),1) a
+                      FROM subject_information_table WHERE YEAR(hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) AND $CASE $SCOPE GROUP BY m");
+while ($r=$sq2->fetch_row()) $seas[(int)$r[0]]=(float)$r[1];
+$seasJ = json_encode(array_values($seas));
+
+/* ---------------- AMR — antimicrobial resistance (selected year) ---------------- */
+$amrCat=array(); $amrR=array(); $amrI=array(); $amrS=array(); $amrPct=array(); $amrTot=0; $amrRes=0;
+$amr = $bdsis->query("SELECT COALESCE(NULLIF(TRIM(t.antimicrobial_agent),''), a.antimicrobial_code) nm,
+                        SUM(a.ast_result='Resistant') r, SUM(a.ast_result='Intermediate') i,
+                        SUM(a.ast_result='Susceptible') s, COUNT(*) n
+                      FROM bacteriology_ast_table a
+                      JOIN bacteriology_result_table2 b ON a.brt2_id=b.record_id
+                      JOIN subject_information_table su ON b.subject_id=su.subject_id
+                      LEFT JOIN ms_ast_table t ON a.antimicrobial_code=t.code AND a.ast_method_id=t.ast_method_id
+                      WHERE YEAR(su.hospital_visit_date)=$year $SCOPE_SU
+                      GROUP BY a.antimicrobial_code HAVING COUNT(*)>=10
+                      ORDER BY (SUM(a.ast_result='Resistant')/COUNT(*)) DESC LIMIT 12");
+while ($r=$amr->fetch_row()){ $amrCat[]=$r[0]; $amrR[]=(int)$r[1]; $amrI[]=(int)$r[2]; $amrS[]=(int)$r[3];
+    $amrPct[]=round(100*$r[1]/$r[4],1); $amrTot+=(int)$r[4]; $amrRes+=(int)$r[1]; }
+$amrOverall = $amrTot>0 ? round(100*$amrRes/$amrTot,1) : 0;
+$amrCatJ=json_encode($amrCat); $amrRJ=json_encode($amrR); $amrIJ=json_encode($amrI); $amrSJ=json_encode($amrS);
+
+/* ---------------- Samples per sentinel site (by month, stacked) ---------------- */
+$siteNames=array(); $siteIdx=array(); $i=0;
+$hc = $bdsis->query("SELECT center_id, center_name FROM rcdc_commondb.ms_health_center_table WHERE dsis=1 $SCOPE ORDER BY center_name");
+while ($r=$hc->fetch_row()){ $siteIdx[$r[0]]=$i++; $siteNames[]=$r[1]; }
+$nSite=count($siteNames);
+$siteMonth=array(); for($m=1;$m<=12;$m++) $siteMonth[$m]=array_fill(0,max($nSite,1),0);
+$sq = $bdsis->query("SELECT su.center_id, MONTH(su.hospital_visit_date) m, COUNT(*) c
+                     FROM subject_information_table su
+                     JOIN rcdc_commondb.ms_health_center_table h ON su.center_id=h.center_id AND h.dsis=1
+                     WHERE YEAR(su.hospital_visit_date)=$year AND $CASE $SCOPE_SU GROUP BY su.center_id, m");
+while ($r=$sq->fetch_row()) if (isset($siteIdx[$r[0]])) $siteMonth[(int)$r[1]][$siteIdx[$r[0]]]=(int)$r[2];
+$monthNames=array(1=>'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec');
+$siteSeries=array(); foreach($monthNames as $m=>$nm) $siteSeries[]=array('name'=>$nm,'data'=>array_values($siteMonth[$m]));
+$siteNamesJ=json_encode($siteNames); $siteSeriesJ=json_encode($siteSeries, JSON_NUMERIC_CHECK);
+
+/* Year list */
+$years=array();
+$yq=$bdsis->query("SELECT DISTINCT YEAR(hospital_visit_date) y FROM subject_information_table WHERE YEAR(hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE ORDER BY y DESC");
+while($r=$yq->fetch_row()) $years[]=(int)$r[0];
+
+function arrow($d){ if($d>0) return '<i class="fas fa-arrow-up"></i> '.$d.'%'; if($d<0) return '<i class="fas fa-arrow-down"></i> '.abs($d).'%'; return '&mdash;'; }
+?>
+
+<?php
+  /* Presentation-only helper. More diarrhoea cases than last year is bad news in
+     surveillance, so a rise is red and a fall is green -- the reverse of a
+     financial dashboard. The figure itself still comes from arrow(). */
+  $deltaClass = $caseDelta > 0 ? 'kpi-delta--up' : ($caseDelta < 0 ? 'kpi-delta--down' : 'kpi-delta--flat');
+?>
+
+<!-- Filter -->
+<form action="" method="POST" class="dash-toolbar">
+  <div class="dash-toolbar__field">
+    <label class="dash-toolbar__label" for="col_year">
+      <i class="far fa-calendar-alt" aria-hidden="true"></i> Surveillance Year
+    </label>
+    <select name="col_year" id="col_year" class="form-control" onchange="this.form.submit()">
+      <?php foreach ($years as $y) echo '<option value="'.$y.'"'.($y==$year?' selected':'').'>'.$y.'</option>'; ?>
+    </select>
+    <!-- The select auto-submits, so the button is only a fallback for browsers
+         with JS disabled; it is hidden from everyone else. -->
+    <noscript><button type="submit" class="btn btn-sm bg-gradient-primary ml-2">Apply</button></noscript>
+  </div>
+
+  <div class="dash-toolbar__meta">
+    <span class="dash-toolbar__scope">Viewing <strong><?=$year?></strong></span>
+    <span class="dash-toolbar__note">Cases, geography, demographics, trends &amp; antimicrobial resistance</span>
+  </div>
+</form>
+
+<!-- Key indicators. Presentational only: these are <article> elements, not links
+     or buttons, so nothing here is clickable or focusable. -->
+<div class="kpi-grid">
+  <article class="kpi-card" style="--kpi-accent:var(--nt-sky);--kpi-tint:rgba(23,162,184,.12)">
+    <span class="kpi-card__icon"><i class="fas fa-procedures" aria-hidden="true"></i></span>
+    <div class="kpi-card__body">
+      <p class="kpi-card__label">Diarrhoea Cases</p>
+      <p class="kpi-card__value"><?=number_format($casesYr)?></p>
+      <p class="kpi-card__meta">vs <?=$prev?> <span class="kpi-delta <?=$deltaClass?>"><?=arrow($caseDelta)?></span></p>
+    </div>
+  </article>
+  <article class="kpi-card" style="--kpi-accent:var(--nt-primary);--kpi-tint:rgba(0,123,255,.12)">
+    <span class="kpi-card__icon"><i class="fas fa-vials" aria-hidden="true"></i></span>
+    <div class="kpi-card__body">
+      <p class="kpi-card__label">Samples Collected</p>
+      <p class="kpi-card__value"><?=number_format($samplesYr)?></p>
+      <p class="kpi-card__meta">Surveillance year <?=$year?></p>
+    </div>
+  </article>
+  <article class="kpi-card" style="--kpi-accent:var(--nt-slate-500);--kpi-tint:rgba(100,116,139,.12)">
+    <span class="kpi-card__icon"><i class="fas fa-microscope" aria-hidden="true"></i></span>
+    <div class="kpi-card__body">
+      <p class="kpi-card__label">Lab Results Recorded</p>
+      <p class="kpi-card__value"><?=number_format($labYr)?></p>
+      <p class="kpi-card__meta">Subjects with a bacteriology result</p>
+    </div>
+  </article>
+  <article class="kpi-card" style="--kpi-accent:var(--nt-red);--kpi-tint:rgba(220,53,69,.12)">
+    <span class="kpi-card__icon"><i class="fas fa-bacteria" aria-hidden="true"></i></span>
+    <div class="kpi-card__body">
+      <p class="kpi-card__label">Pathogens Isolated</p>
+      <p class="kpi-card__value"><?=number_format($posYr)?></p>
+      <p class="kpi-card__meta">Positivity <b><?=$posRate?>%</b> of <?=number_format($labYr)?> tested</p>
+    </div>
+  </article>
+  <article class="kpi-card" style="--kpi-accent:var(--nt-amber);--kpi-tint:rgba(253,126,20,.12)">
+    <span class="kpi-card__icon"><i class="fas fa-shield-virus" aria-hidden="true"></i></span>
+    <div class="kpi-card__body">
+      <p class="kpi-card__label">AMR &mdash; Resistant</p>
+      <p class="kpi-card__value"><?=$amrOverall?>%</p>
+      <p class="kpi-card__meta"><?=number_format($amrTot)?> susceptibility tests</p>
+    </div>
+  </article>
+</div>
+
+<!-- Trend + Prevalence -->
+<div class="dash-row">
+  <div class="dash-col-7">
+    <div class="chart-card" style="--chart-accent:var(--nt-sky)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Incidence Trend</h3>
+        <p class="chart-card__sub">Monthly cases against an outbreak threshold of mean + 2 SD (<?=$threshold?>)</p>
+      </div>
+      <div class="chart-card__body"><div id="trendChart" style="height:330px;"></div></div>
+    </div>
+  </div>
+  <div class="dash-col-5">
+    <div class="chart-card" style="--chart-accent:var(--nt-red)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Pathogen Prevalence</h3>
+        <p class="chart-card__sub">Top isolates, <?=$year?></p>
+      </div>
+      <div class="chart-card__body"><div id="prevalenceChart" style="height:330px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Segmentation: diagnostic methods & pathogens -->
+<div class="dash-row">
+  <div class="dash-col-5">
+    <div class="chart-card" style="--chart-accent:var(--nt-violet)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Diagnostic Method</h3>
+        <p class="chart-card__sub">Tested vs positive. Microscopy positivity omitted &mdash; the ova/cyst field is free text and not standardised.</p>
+      </div>
+      <div class="chart-card__body"><div id="methodChart" style="height:330px;"></div></div>
+    </div>
+  </div>
+  <div class="dash-col-7">
+    <div class="chart-card" style="--chart-accent:var(--nt-violet)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Pathogens by Method</h3>
+        <p class="chart-card__sub">Bacterial (culture) &middot; viral and antigen (ELISA) &middot; E.&nbsp;coli pathotype (PCR)</p>
+      </div>
+      <div class="chart-card__body"><div id="segChart" style="height:330px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Geographic + Age/Sex -->
+<div class="dash-row">
+  <div class="dash-col-6">
+    <div class="chart-card" style="--chart-accent:var(--nt-green)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Geographic Distribution</h3>
+        <p class="chart-card__sub">Cases by dzongkhag, <?=$year?></p>
+      </div>
+      <div class="chart-card__body"><div id="geoChart" style="height:360px;"></div></div>
+    </div>
+  </div>
+  <div class="dash-col-6">
+    <div class="chart-card" style="--chart-accent:var(--nt-slate-500)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Age Group &amp; Sex</h3>
+        <p class="chart-card__sub">Age recorded for <b><?=number_format($ageKnown)?></b> of <?=number_format($casesYr)?> cases</p>
+      </div>
+      <div class="chart-card__body"><div id="ageSexChart" style="height:330px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Year-on-year + Seasonality -->
+<div class="dash-row">
+  <div class="dash-col-6">
+    <div class="chart-card" style="--chart-accent:var(--nt-sky)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Year-on-Year Comparison</h3>
+        <p class="chart-card__sub">Total diarrhoea cases per surveillance year</p>
+      </div>
+      <div class="chart-card__body"><div id="yoyChart" style="height:320px;"></div></div>
+    </div>
+  </div>
+  <div class="dash-col-6">
+    <div class="chart-card" style="--chart-accent:var(--nt-amber)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Seasonal Variation</h3>
+        <p class="chart-card__sub">Average cases per month across all years</p>
+      </div>
+      <div class="chart-card__body"><div id="seasonChart" style="height:320px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- AMR -->
+<div class="dash-row">
+  <div class="dash-col-12">
+    <div class="chart-card" style="--chart-accent:var(--nt-amber)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Antimicrobial Resistance</h3>
+        <p class="chart-card__sub">Susceptibility by agent, <?=$year?>. Agents with &ge;10 tests, sorted by % resistant. Overall resistance <b><?=$amrOverall?>%</b> of <?=number_format($amrTot)?> tests.</p>
+      </div>
+      <div class="chart-card__body"><div id="amrChart" style="height:380px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Samples per site -->
+<div class="dash-row">
+  <div class="dash-col-12">
+    <div class="chart-card" style="--chart-accent:var(--nt-primary)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Samples by Sentinel Site</h3>
+        <p class="chart-card__sub">Target is at least 100 samples per site per year (about 9 per month)</p>
+      </div>
+      <div class="chart-card__body"><div id="siteChart" style="height:360px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<script type="text/javascript">
+$(function () {
+  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var exp={ scale:3, fallbackToExportServer:false };
+
+  /* Shared chart styling. Typography, axis and tooltip treatment only -- no
+     series, categories or values are touched here, so every figure still comes
+     from the queries above. Each chart's own options are merged over this. */
+  Highcharts.setOptions({
+    chart: {
+      backgroundColor: 'transparent',
+      style: { fontFamily: "'Source Sans Pro', -apple-system, 'Segoe UI', Roboto, sans-serif" },
+      spacing: [8, 8, 8, 8]
+    },
+    title: { style: { fontSize: '14px', fontWeight: '700', color: '#1e293b' } },
+    xAxis: {
+      lineColor: '#e2e8f0', tickColor: '#e2e8f0',
+      labels: { style: { color: '#64748b', fontSize: '11px' } },
+      title: { style: { color: '#64748b', fontSize: '11px', fontWeight: '600' } }
+    },
+    yAxis: {
+      gridLineColor: '#eef2f7', gridLineDashStyle: 'Dot',
+      labels: { style: { color: '#64748b', fontSize: '11px' } },
+      title: { style: { color: '#64748b', fontSize: '11px', fontWeight: '600' } }
+    },
+    legend: {
+      itemStyle: { color: '#475569', fontWeight: '600', fontSize: '11px' },
+      itemHoverStyle: { color: '#0f172a' }
+    },
+    tooltip: {
+      backgroundColor: 'rgba(15,23,42,.92)', borderWidth: 0, borderRadius: 8,
+      style: { color: '#fff', fontSize: '12px' }, shadow: false
+    },
+    plotOptions: {
+      series: {
+        borderWidth: 0,
+        dataLabels: { style: { fontSize: '10px', fontWeight: '600', textOutline: 'none', color: '#475569' } }
+      }
+    },
+    credits: { enabled: false }
+  });
+
+  Highcharts.chart('trendChart', {
+    chart:{ type:'line', zoomType:'x' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:months }, yAxis:{ min:0, title:{text:'Diarrhoea cases'}, allowDecimals:false,
+      plotLines:[{ value:<?=$threshold?>, color:'#dc3545', dashStyle:'Dash', width:1,
+        label:{ text:'Outbreak threshold (mean + 2 SD = <?=$threshold?>)', style:{fontSize:'9px', color:'#dc3545'} } }] },
+    tooltip:{ shared:true, valueSuffix:' cases' },
+    series:[
+      { name:'<?=$year?>', data:<?=$trendThis?>, color:'#17a2b8', lineWidth:3, marker:{enabled:true} },
+      { name:'<?=$prev?>', data:<?=$trendPrev?>, color:'#adb5bd', dashStyle:'ShortDash' },
+      { name:'Above threshold', type:'scatter', data:<?=$outbreakJ?>, color:'#dc3545',
+        marker:{ symbol:'circle', radius:6 }, tooltip:{ pointFormat:'<b>{point.y} cases</b> (elevated)' } }
+    ]
+  });
+
+  Highcharts.chart('prevalenceChart', {
+    chart:{ type:'bar' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$prevCatJ?>, labels:{style:{fontSize:'11px'}} },
+    yAxis:{ min:0, title:{text:'Isolates'}, allowDecimals:false },
+    legend:{enabled:false}, tooltip:{ valueSuffix:' isolates' },
+    plotOptions:{ bar:{ dataLabels:{enabled:true} } },
+    series:[{ name:'Isolates', data:<?=$prevValJ?>, color:'#dc3545' }]
+  });
+
+  Highcharts.chart('methodChart', {
+    chart:{ type:'column' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=json_encode($methCat)?> },
+    yAxis:{ min:0, title:{text:'Subjects'}, allowDecimals:false },
+    tooltip:{ shared:true, valueSuffix:' subjects' },
+    plotOptions:{ column:{ dataLabels:{enabled:true} } },
+    series:[
+      { name:'Tested', data:<?=$methTestedJ?>, color:'#adb5bd' },
+      { name:'Positive', data:<?=$methPosJ?>, color:'#6f42c1' }
+    ]
+  });
+
+  Highcharts.chart('segChart', {
+    chart:{ type:'bar' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$segCatsJ?>, labels:{style:{fontSize:'10px'}} },
+    yAxis:{ min:0, title:{text:'Cases / isolates'}, allowDecimals:false, stackLabels:{enabled:false} },
+    tooltip:{ valueSuffix:' detections' },
+    plotOptions:{ series:{ stacking:'normal' } },
+    series:[
+      { name:'Bacterial (Culture)', data:<?=$segBactJ?>, color:'#dc3545' },
+      { name:'Viral / Antigen (ELISA)', data:<?=$segElisaJ?>, color:'#17a2b8' },
+      { name:'E. coli pathotype (PCR)', data:<?=$segPcrJ?>, color:'#f39c12' }
+    ]
+  });
+
+  Highcharts.chart('geoChart', {
+    chart:{ type:'bar' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$geoCatJ?>, labels:{style:{fontSize:'10px'}} },
+    yAxis:{ min:0, title:{text:'Cases'}, allowDecimals:false },
+    legend:{enabled:false}, tooltip:{ valueSuffix:' cases' },
+    plotOptions:{ bar:{ dataLabels:{enabled:true}, color:'#28a745' } },
+    series:[{ name:'Cases', data:<?=$geoValJ?> }]
+  });
+
+  Highcharts.chart('ageSexChart', {
+    chart:{ type:'column' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$ageGroupsJ?>, title:{text:'Age group (years)'} },
+    yAxis:{ min:0, title:{text:'Cases'}, allowDecimals:false, stackLabels:{enabled:true} },
+    tooltip:{ shared:true, valueSuffix:' cases' },
+    plotOptions:{ column:{ stacking:'normal' } },
+    series:[ { name:'Male', data:<?=$ageMJ?>, color:'#3c8dbc' }, { name:'Female', data:<?=$ageFJ?>, color:'#d81b60' } ]
+  });
+
+  Highcharts.chart('yoyChart', {
+    chart:{ type:'column' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$yoyCatJ?> }, yAxis:{ min:0, title:{text:'Diarrhoea cases'}, allowDecimals:false },
+    legend:{enabled:false}, tooltip:{ valueSuffix:' cases' },
+    plotOptions:{ column:{ dataLabels:{enabled:true} } },
+    series:[{ name:'Cases', data:<?=$yoyDataJ?> }]
+  });
+
+  Highcharts.chart('seasonChart', {
+    chart:{ type:'areaspline' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:months }, yAxis:{ min:0, title:{text:'Avg cases / month'} },
+    legend:{enabled:false}, tooltip:{ valueSuffix:' cases (avg)' },
+    plotOptions:{ areaspline:{ fillOpacity:0.3, color:'#f39c12' } },
+    series:[{ name:'Avg cases', data:<?=$seasJ?> }]
+  });
+
+  Highcharts.chart('amrChart', {
+    chart:{ type:'bar' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$amrCatJ?>, labels:{style:{fontSize:'11px'}} },
+    yAxis:{ min:0, title:{text:'No. of isolates tested'}, allowDecimals:false, reversedStacks:false },
+    tooltip:{ shared:true },
+    plotOptions:{ series:{ stacking:'normal' } },
+    series:[
+      { name:'Resistant', data:<?=$amrRJ?>, color:'#dc3545' },
+      { name:'Intermediate', data:<?=$amrIJ?>, color:'#f39c12' },
+      { name:'Susceptible', data:<?=$amrSJ?>, color:'#28a745' }
+    ]
+  });
+
+  Highcharts.chart('siteChart', {
+    chart:{ type:'column' }, credits:{enabled:false}, title:{text:null}, exporting:exp,
+    xAxis:{ categories:<?=$siteNamesJ?>, crosshair:true, title:{text:'Sentinel Sites'}, labels:{style:{fontSize:'10px'}} },
+    yAxis:{ min:0, title:{text:'Samples'}, allowDecimals:false,
+      plotLines:[{ value:100, color:'#28a745', dashStyle:'Dash', width:1, label:{text:'Annual target (100)', style:{fontSize:'9px'}} }] },
+    tooltip:{ shared:true, valueSuffix:' samples' }, legend:{ itemStyle:{fontSize:'10px'} },
+    plotOptions:{ column:{ stacking:'normal' } },
+    series:<?=$siteSeriesJ?>
+  });
+});
+</script>

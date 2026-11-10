@@ -1,0 +1,117 @@
+<?php
+/**
+ * Save endpoint for masters/pathogens.php.
+ *
+ * POST only. Guards: bdsis_require_module -> bdsis_require_admin (from _inc.php)
+ * -> bdsis_csrf_require. Then dispatch on `do`.
+ *
+ * Actions:
+ *   insert  new (pid, name) row, refused if pid exists
+ *   update  rename existing pid (never re-key the row)
+ *   delete  hard-delete a row that no result row references
+ *
+ * Every result is flashed to the session and the user is 303'd back to
+ * pathogens.php so a refresh does not repost.
+ */
+require_once __DIR__ . '/_inc.php';
+bdsis_csrf_require();
+
+/* RBAC: pathogens is a LOCAL BDSIS master. Write actions (insert, update)
+   require ADMIN or CONTRIBUTOR; delete requires ADMIN. Each branch below
+   enforces its own; this pre-gate rejects READONLY / DENIED tiers up
+   front so those users cannot even POST to this endpoint. */
+if (!bdsis_masters_can_write('pathogens')) {
+    bdsis_masters_require_write('pathogens', 'write');
+}
+
+if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    mdFlash('danger', 'Master-data actions must be submitted from the form.');
+    mdRedirect('pathogens.php');
+}
+
+$do  = isset($_POST['do'])   ? (string)$_POST['do']   : '';
+$pid = isset($_POST['pid'])  ? trim((string)$_POST['pid'])  : '';
+$name= isset($_POST['name']) ? trim((string)$_POST['name']) : '';
+
+/* pid may only contain safe id characters and be short. Both to protect the
+   prepared-statement query and to keep the id displayable in reports. */
+if ($do !== 'delete' && $pid === '') {
+    mdFlash('danger', 'Pathogen ID is required.'); mdRedirect('pathogens.php');
+}
+if ($pid !== '' && !preg_match('~^[A-Za-z0-9_-]{1,10}$~', $pid)) {
+    mdFlash('danger', 'Pathogen ID must be 1-10 characters: letters, digits, dash or underscore only.');
+    mdRedirect('pathogens.php');
+}
+
+switch ($do) {
+    case 'insert':
+        if ($name === '') { mdFlash('danger', 'Pathogen name is required.'); mdRedirect('pathogens.php'); }
+        /* Check duplicate id first so the message is precise. A racing insert
+           would still be caught by a unique-key error but this covers the common
+           case without a stack trace. */
+        $chk = $bdsis->prepare("SELECT 1 FROM ms_enteric_bacterial_pathogen_table WHERE pathogen_id=?");
+        $chk->bind_param("s", $pid); $chk->execute(); $chk->store_result();
+        $exists = $chk->num_rows > 0; $chk->close();
+        if ($exists) {
+            mdFlash('danger', "Pathogen ID '$pid' already exists. Use a different ID or edit the existing row.");
+            mdRedirect('pathogens.php');
+        }
+        $ins = $bdsis->prepare("INSERT INTO ms_enteric_bacterial_pathogen_table(pathogen_id, enteric_pathogen) VALUES (?, ?)");
+        if (!$ins) { mdFlash('danger', 'Database error preparing insert.'); mdRedirect('pathogens.php'); }
+        $ins->bind_param("ss", $pid, $name);
+        $ok = $ins->execute(); $ins->close();
+        mdFlash($ok ? 'success' : 'danger', $ok ? "Pathogen '$pid' added." : 'Insert failed.');
+        mdRedirect('pathogens.php');
+        break;
+
+    case 'update':
+        if ($name === '') { mdFlash('danger', 'Pathogen name is required.'); mdRedirect('pathogens.php'); }
+        $upd = $bdsis->prepare("UPDATE ms_enteric_bacterial_pathogen_table SET enteric_pathogen=? WHERE pathogen_id=?");
+        if (!$upd) { mdFlash('danger', 'Database error preparing update.'); mdRedirect('pathogens.php'); }
+        $upd->bind_param("ss", $name, $pid);
+        $ok = $upd->execute();
+        $aff = $upd->affected_rows; $upd->close();
+        if ($ok) {
+            /* affected_rows==0 means either "row not found" or "value unchanged"
+               (MySQL reports 0 when the update is a no-op). Say what actually
+               happened rather than "success" for something that did nothing. */
+            $exists = $bdsis->query("SELECT 1 FROM ms_enteric_bacterial_pathogen_table WHERE pathogen_id='" . $bdsis->real_escape_string($pid) . "'");
+            $found  = ($exists && $exists->num_rows > 0);
+            if (!$found)         { mdFlash('warning', "No pathogen '$pid' to update."); }
+            elseif ($aff === 0)  { mdFlash('info',    "Pathogen '$pid' was already named that; nothing changed."); }
+            else                 { mdFlash('success', "Pathogen '$pid' renamed."); }
+        } else {
+            mdFlash('danger', 'Update failed.');
+        }
+        mdRedirect('pathogens.php');
+        break;
+
+    case 'delete':
+        /* Delete gate: ADMIN only (bdsis_masters_can_write allows CONTRIBUTOR
+           for pathogens but not delete). Belt-and-braces: the UI hides the
+           button for non-admins, this refuses a bookmarked POST. */
+        bdsis_masters_require_delete('pathogens');
+        /* Refuse if any bacteriology or PCR row references this pathogen.
+           Renaming existing rows to a new id is not offered; use "Retire"
+           (edit $bpRetiredPathogens in lab.php) if you need to hide it from
+           the pick list while keeping history. */
+        $bactCnt = mdCountRefs($bdsis, "SELECT COUNT(*) FROM bacteriology_result_table2 WHERE pathogen_id=?", "s", $pid);
+        $pcrCnt  = mdCountRefs($bdsis, "SELECT COUNT(*) FROM rcdc_ecoli_pcr_result_table2 WHERE ecoli_id=?",   "s", $pid);
+        if (($bactCnt + $pcrCnt) > 0) {
+            mdFlash('danger', "Cannot delete '$pid': still referenced by $bactCnt bacteriology row(s) and $pcrCnt PCR row(s). Retire it in lab.php instead.");
+            mdRedirect('pathogens.php');
+        }
+        $del = $bdsis->prepare("DELETE FROM ms_enteric_bacterial_pathogen_table WHERE pathogen_id=?");
+        if (!$del) { mdFlash('danger', 'Database error preparing delete.'); mdRedirect('pathogens.php'); }
+        $del->bind_param("s", $pid);
+        $ok  = $del->execute(); $aff = $del->affected_rows; $del->close();
+        if ($ok && $aff > 0) { mdFlash('success', "Pathogen '$pid' deleted."); }
+        elseif ($ok)         { mdFlash('warning', "No pathogen '$pid' to delete."); }
+        else                 { mdFlash('danger',  'Delete failed.'); }
+        mdRedirect('pathogens.php');
+        break;
+
+    default:
+        mdFlash('danger', 'Unrecognised action.');
+        mdRedirect('pathogens.php');
+}

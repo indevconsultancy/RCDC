@@ -1,0 +1,110 @@
+<?php
+	require_once("../config/session.php");
+	require_once("../includes/rbac.php");
+	bdsis_require_module();   // this endpoint served master data with no session at all
+
+	if(isset($_GET["mid"]) AND $_GET["mid"]!=""){
+		require_once("../config/db-config.php");
+		/* Escaped: mid and prtrid are interpolated into the queries below and were
+		   taken raw from the query string. */
+		$mid    = $bdsis->real_escape_string($_GET["mid"]);
+		$cntrx  = $_GET["cntr"];
+		$codex  = $_GET["code"];
+		$zonex  = $_GET["zone"];
+		$prtrid = $bdsis->real_escape_string($_GET["prtrid"] ?? '');
+
+		/* Authorise the record this AST panel belongs to. prt3_record_id chains
+		   back to a subject via the PCR result tables; a facility user must not
+		   read another facility's AST zone diameters by guessing an id. Enforced
+		   only when a saved record is requested -- an empty prtrid is a brand-new
+		   AST panel built from master data (ms_ast_table), which carries no
+		   patient data to protect. Uses the same bdsis_require_subject() as every
+		   other record endpoint, so the scope rule is not duplicated here. */
+		if($prtrid !== ''){
+			$ownerQ = $bdsis->prepare("SELECT p2.subject_id
+			                             FROM rcdc_ecoli_pcr_result_table2 p2
+			                             JOIN rcdc_ecoli_pcr_result_table3 p3 ON p3.prt2_record_id=p2.record_id
+			                            WHERE p3.record_id=?");
+			if($ownerQ){
+				$ownerQ->bind_param("s", $prtrid);
+				$ownerQ->execute();
+				$ownerQ->bind_result($astSubject);
+				$hasOwner = $ownerQ->fetch();
+				$ownerQ->close();
+				if($hasOwner && $astSubject !== null && $astSubject !== ''){
+					bdsis_require_subject($bdsis, $astSubject);
+				}
+			}
+		}
+
+		/* MIC (method 02): an editable list of antibiotic / MIC value /
+		   interpretation entries instead of the fixed zone list. It needs no
+		   counter field -- entries post as mic[<prt3rid>][<uuid>][...] -- so it
+		   returns here. Disk Diffusion below is unchanged. */
+		require_once("../includes/lab-helpers.php");
+		if ($mid === bdsis_mic_method_id()) {
+			echo bdsis_ecoli_mic_panel_html($bdsis, $prtrid);
+			echo bdsis_ecoli_resistance_panels($bdsis, $prtrid);
+			exit;
+		}
+
+		$cntr=1;
+		/**
+		 * Check if already data exist
+		 */
+		$qry=$bdsis->query("SELECT pat.record_id,pat.antimicrobial_code,mat.code,mat.antimicrobial_agent,pat.zone_diameter,pat.ast_result,mat.susceptible,mat.intermediate1,mat.intermediate2,mat.resistance FROM rcdc_ecoli_pcr_ast_table pat, ms_ast_table mat WHERE  pat.antimicrobial_code=mat.code AND pat.prt3_record_id='".$prtrid."' AND mat.ast_method_id='".$mid."' AND mat.status=1 ORDER BY mat.antimicrobial_agent ASC");
+		if($qry->num_rows>0){
+			while(list($patid,$patcode,$code,$agent,$zone,$rslt,$bpSus,$bpInt1,$bpInt2,$bpRes)=$qry->fetch_row()){
+				$patida=$prtrid.$cntr;
+				$codea=$codex.$cntr;
+				$zonea=$zonex.$cntr;
+		?>
+				<div class="form-group col-sm-3">
+					<input type="hidden" name="<?=$patida?>" id="<?=$patida?>" value="<?=$patid;?>" />
+					<input type="hidden" name="<?=$codea?>" id="<?=$codea?>" value="<?=$code;?>" />					
+					<label class="col-form-label-sm"><?=$agent;?>:</label>
+					<input class="form-control eco-zone" type="number" name="<?=$zonea;?>" id="<?=$zonea;?>" placeholder="Zone" value="<?=$zone;?>"
+					       data-code="<?=htmlspecialchars((string)$code, ENT_QUOTES);?>"
+					       data-sus="<?=htmlspecialchars((string)$bpSus, ENT_QUOTES);?>"
+					       data-int1="<?=htmlspecialchars((string)$bpInt1, ENT_QUOTES);?>"
+					       data-int2="<?=htmlspecialchars((string)$bpInt2, ENT_QUOTES);?>"
+					       data-res="<?=htmlspecialchars((string)$bpRes, ENT_QUOTES);?>"
+					       oninput="ecoAstInterpret(this);" />
+					<label class="col-form-label-sm" for="<?=$zonea;?>r">AST Result:</label>
+					<input type="text" id="<?=$zonea;?>r" class="form-control lr-pill eco-astresult" readonly tabindex="-1" placeholder="&ndash;" value="<?=htmlspecialchars((string)$rslt, ENT_QUOTES);?>" />
+				</div>
+		<?php 
+				$cntr++;
+			}
+		}else{
+			$qry=$bdsis->query("SELECT code,antimicrobial_agent,susceptible,intermediate1,intermediate2,resistance FROM ms_ast_table WHERE ast_method_id='".$mid."' AND status=1 ORDER BY antimicrobial_agent ASC");
+			while(list($code,$agent,$bpSus,$bpInt1,$bpInt2,$bpRes)=$qry->fetch_row()){
+				$codea=$codex.$cntr;
+				$zonea=$zonex.$cntr;
+		?>
+				<div class="form-group col-sm-3">
+					<input type="hidden" name="<?=$codea?>" id="<?=$codea?>" value="<?=$code;?>" />					
+					<label class="col-form-label-sm"><?=$agent;?>:</label>
+					<input class="form-control eco-zone" type="number" name="<?=$zonea;?>" id="<?=$zonea;?>" placeholder="Zone"
+					       data-code="<?=htmlspecialchars((string)$code, ENT_QUOTES);?>"
+					       data-sus="<?=htmlspecialchars((string)$bpSus, ENT_QUOTES);?>"
+					       data-int1="<?=htmlspecialchars((string)$bpInt1, ENT_QUOTES);?>"
+					       data-int2="<?=htmlspecialchars((string)$bpInt2, ENT_QUOTES);?>"
+					       data-res="<?=htmlspecialchars((string)$bpRes, ENT_QUOTES);?>"
+					       oninput="ecoAstInterpret(this);" />
+					<label class="col-form-label-sm" for="<?=$zonea;?>r">AST Result:</label>
+					<input type="text" id="<?=$zonea;?>r" class="form-control lr-pill eco-astresult" readonly tabindex="-1" placeholder="&ndash;" />
+				</div>
+		<?php 
+				$cntr++;
+			}
+		}
+		$cntr-=1;
+?>
+	<input type="hidden" name="<?=$cntrx;?>" id="<?=$cntrx;?>" value="<?=$cntr;?>" />
+<?php
+		/* Only a panel that can carry a routine result carries the conditional
+		   tests: Not Required and Pending have nothing to trigger them. */
+		if ($mid === '01') { echo bdsis_ecoli_resistance_panels($bdsis, $prtrid); }
+	}
+?>	

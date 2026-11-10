@@ -1,0 +1,114 @@
+<?php
+/**
+ * Shared bootstrap for every page under BDSIS/masters/.
+ *
+ * A single include so a change to the guard, the flash-message convention or
+ * the layout scaffold applies uniformly. Each page in this folder starts with
+ *
+ *     require_once __DIR__ . '/_inc.php';
+ *
+ * and gets:
+ *   - buffered output (so a refused role can discard the layout and return 403)
+ *   - the session + both DB handles ($commondb, $bdsis)
+ *   - RBAC (module gate + Administrator-only tier gate)
+ *   - CSRF helpers loaded (call bdsis_csrf_require() on write endpoints)
+ *   - a one-shot flash-message API (mdFlash / mdFlashRender)
+ *   - two small helpers for referential-integrity checks used by the CRUD pages.
+ *
+ * No page under masters/ writes to any table outside its own master. Every
+ * write is a prepared statement, admin-tier-guarded and CSRF-checked.
+ */
+
+if (!defined('BDSIS_MASTERS_INC')) {
+    define('BDSIS_MASTERS_INC', 1);
+
+    ob_start();
+
+    require_once __DIR__ . '/../config/session.php';
+    require_once __DIR__ . '/../config/commondb-config.php';
+    require_once __DIR__ . '/../config/db-config.php';
+    require_once __DIR__ . '/../includes/rbac.php';
+    require_once __DIR__ . '/../includes/csrf.php';
+
+    bdsis_require_module();
+
+    if (!function_exists('bdsis_require_admin')) {
+        /**
+         * Refuse anyone who is not a BDSIS Administrator (acl=1).
+         *
+         * Master-data edits reinterpret historical rows (a pathogen renamed
+         * changes what every past report says), so they belong to the same
+         * audience that already holds delete / verify / approve / export --
+         * the ADMIN tier only. RCDC (contributor) and DHO/MoH/BFDA
+         * (read-only) never reach this guard.
+         *
+         * @param string $action for the audit log
+         */
+        function bdsis_require_admin($action = 'access')
+        {
+            if (bdsis_permission_tier() !== BDSIS_TIER_ADMIN) {
+                bdsis_deny(
+                    'Master Data management is limited to BDSIS Administrators. '
+                    . 'Contact the RCDC ICT unit if you need this access.',
+                    $action,
+                    'masters'
+                );
+            }
+        }
+    }
+    bdsis_require_admin();
+
+    /* Flash messages survive one redirect after a POST so the success/error
+       shows on the list page rather than on the handler. Kept in the session
+       because it is per-user, one-shot, and small. */
+    if (!function_exists('mdFlash')) {
+        function mdFlash($type, $text)
+        {
+            if (session_status() === PHP_SESSION_NONE) { session_start(); }
+            $_SESSION['md_flash'] = array('type' => (string)$type, 'text' => (string)$text);
+        }
+    }
+    if (!function_exists('mdFlashRender')) {
+        function mdFlashRender()
+        {
+            if (session_status() === PHP_SESSION_NONE) { session_start(); }
+            if (empty($_SESSION['md_flash'])) { return ''; }
+            $f = $_SESSION['md_flash']; unset($_SESSION['md_flash']);
+            $type = in_array($f['type'], array('success','danger','warning','info'), true) ? $f['type'] : 'info';
+            return '<div class="alert alert-' . htmlspecialchars($type, ENT_QUOTES) . ' alert-dismissible fade show" role="alert">'
+                 . htmlspecialchars($f['text'], ENT_QUOTES)
+                 . '<button type="button" class="close" data-dismiss="alert" aria-label="Close"><span aria-hidden="true">&times;</span></button>'
+                 . '</div>';
+        }
+    }
+
+    /* Small helpers for referential-integrity checks used by the pathogen and
+       antimicrobial pages. Both return an integer count. */
+    if (!function_exists('mdCountRefs')) {
+        function mdCountRefs($bdsis, $sql, $bindType, $bindValue)
+        {
+            if (!($bdsis instanceof mysqli)) { return 0; }
+            $q = $bdsis->prepare($sql);
+            if (!$q) { return 0; }
+            $q->bind_param($bindType, $bindValue);
+            $q->execute();
+            $q->bind_result($n);
+            $q->fetch();
+            $q->close();
+            return (int)$n;
+        }
+    }
+
+    /* Consistent way to end a POST handler: flash + 303 See Other + exit. */
+    if (!function_exists('mdRedirect')) {
+        function mdRedirect($relPath)
+        {
+            /* Same base as the referring page. `relPath` is a sibling file name
+               like "pathogens.php" -- no protocol, no host, no leading slash. */
+            $safe = preg_replace('~[^A-Za-z0-9_.\-?&=]~', '', (string)$relPath);
+            while (ob_get_level() > 0) { ob_end_clean(); }
+            header('Location: ' . $safe, true, 303);
+            exit;
+        }
+    }
+}

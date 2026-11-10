@@ -1,0 +1,391 @@
+<?php
+/* ===========================================================================
+   E. coli AST -- Minimum Inhibitory Concentration (MIC) result entries.
+   ---------------------------------------------------------------------------
+   Loaded by includes/lab-helpers.php, so everything that includes the lab
+   helpers (lab.php, iu-lab.php, load-ecoli-ast.php, the reports) has it.
+
+   Per E. coli pathotype panel the reader chooses the AST method (methoda..l).
+   '01' is Disk Diffusion: a fixed list of zones, interpreted from breakpoints.
+   '02' is MIC: a free list of entries the reader builds --
+
+       antibiotic      ms_ast_table, method 01 active (the Disk Diffusion list)
+       MIC value       text: "<=0.5", "2", "16", ">64", "0.5/9.5"
+       interpretation  stated by the reader: S / I / R / SDD / N/A
+
+   Entries are rows of rcdc_ecoli_pcr_ast_table with ast_method_id '02'; see
+   sql/2026-09-17_ecoli_ast_mic.sql for the column mapping. They are posted as
+
+       mic[<prt3 record id>][<entry uuid>][code|value|interp]
+
+   keyed by the pathotype record rather than the panel letter, so no two panels
+   can collide. Nothing posted is trusted: record ownership, antibiotic, value,
+   interpretation, duplicates and the uuid are all checked on save.
+
+   In the schema the brief describes, one entry is
+     { id, antibioticId, antibioticName, micValue, interpretation }
+   which is exactly what bdsis_ecoli_mic_load() returns.
+   =========================================================================== */
+
+if (!function_exists('bdsis_mic_method_id')) {
+    /** ms_ast_method_table id the form's "MIC" option posts. @return string */
+    function bdsis_mic_method_id() { return '02'; }
+}
+
+if (!function_exists('bdsis_ast_method_label')) {
+    /**
+     * Display name of an AST method. ms_ast_method_table names '02' "E-Test"
+     * (a gradient technique that yields an MIC); the form has always offered it
+     * as "MIC", so that is what a saved record shows too.
+     *
+     * @param  string $methodId
+     * @param  string $fallback name from ms_ast_method_table
+     * @return string
+     */
+    function bdsis_ast_method_label($methodId, $fallback = '')
+    {
+        $labels = array('01' => 'Disk Diffusion', '02' => 'MIC');
+        $methodId = (string)$methodId;
+        return isset($labels[$methodId]) ? $labels[$methodId] : (string)$fallback;
+    }
+}
+
+if (!function_exists('bdsis_mic_interpretations')) {
+    /**
+     * Interpretation choices: code shown in the form => value stored.
+     * S / I / R are stored as the words Disk Diffusion rows already hold, so
+     * every consumer (Group Report, Excel export) reads both methods alike.
+     * SDD and N/A have no existing word and fit ast_result varchar(20) as-is.
+     *
+     * @return array
+     */
+    function bdsis_mic_interpretations()
+    {
+        return array(
+            'S'   => 'Susceptible',
+            'I'   => 'Intermediate',
+            'R'   => 'Resistant',
+            'SDD' => 'SDD',
+            'N/A' => 'N/A',
+        );
+    }
+}
+
+if (!function_exists('bdsis_mic_interpretation_labels')) {
+    /** Option text for each code. @return array */
+    function bdsis_mic_interpretation_labels()
+    {
+        return array(
+            'S'   => 'S — Susceptible',
+            'I'   => 'I — Intermediate',
+            'R'   => 'R — Resistant',
+            'SDD' => 'SDD — Susceptible-dose dependent',
+            'N/A' => 'N/A — Not applicable',
+        );
+    }
+}
+
+if (!function_exists('bdsis_mic_normalize_value')) {
+    /**
+     * Normalise an MIC value, or null when it is not one.
+     *
+     * Accepted grammar (whitespace and Unicode variants normalised first):
+     *   comparator?  number  (- number)?  ( / number  (- number)? )?  ^?
+     *
+     * Where
+     *   comparator  <=, >=, <, >, =, or the Unicode ≤ / ≥ (both mapped to ASCII)
+     *   number      integer or decimal (e.g. 0.12, 16, 64)
+     *   -           optional range connector, e.g. 0.12-0.5
+     *   /           optional combination agent split, e.g. 0.5/9.5, 0.12-0.5/2-4
+     *   ^           optional trailing marker as it appears on the client's
+     *               reference sheet (e.g. 16^, 2^, 0.12-0.5^). Its semantics
+     *               are still to be confirmed with the client, so it is only
+     *               STORED here -- no interpretation logic depends on it. Once
+     *               the meaning is settled, add the classifier in a follow-up
+     *               without changing this normalizer's contract.
+     *
+     * Anything longer than the column (10 characters) is refused rather than
+     * truncated -- the MIC value lives in rcdc_ecoli_pcr_ast_table.zone_diameter
+     * which is varchar(10) (see sql/2026-09-17_ecoli_ast_mic.sql), so a longer
+     * string would be silently clipped by MySQL.
+     *
+     * @param  mixed $value
+     * @return string|null
+     */
+    function bdsis_mic_normalize_value($value)
+    {
+        if (is_array($value)) { return null; }
+        $v = trim((string)$value);
+        $v = str_replace(array("\xE2\x89\xA4", "\xE2\x89\xA5", ' ', "\t"), array('<=', '>=', '', ''), $v);
+        if ($v === '') { return null; }
+        /* Build the pattern in parts so the intent stays readable. */
+        $num  = '\d+(\.\d+)?';
+        $rng  = $num . '(-' . $num . ')?';
+        if (!preg_match('~^(<=|>=|<|>|=)?' . $rng . '(/' . $rng . ')?\^?$~', $v)) { return null; }
+        if (strlen($v) > 10) { return null; }
+        return $v;
+    }
+}
+
+if (!function_exists('bdsis_uuid_v4')) {
+    /** A random RFC 4122 version-4 UUID. @return string */
+    function bdsis_uuid_v4()
+    {
+        $b = random_bytes(16);
+        $b[6] = chr((ord($b[6]) & 0x0f) | 0x40);
+        $b[8] = chr((ord($b[8]) & 0x3f) | 0x80);
+        $x = bin2hex($b);
+        return substr($x, 0, 8) . '-' . substr($x, 8, 4) . '-' . substr($x, 12, 4) . '-' . substr($x, 16, 4) . '-' . substr($x, 20, 12);
+    }
+}
+
+if (!function_exists('bdsis_uuid_v4_valid')) {
+    /** @return bool */
+    function bdsis_uuid_v4_valid($value)
+    {
+        return is_string($value)
+            && (bool)preg_match('~^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$~', $value);
+    }
+}
+
+if (!function_exists('bdsis_mic_agents')) {
+    /**
+     * Antibiotics offered for an MIC entry: exactly the Disk Diffusion list
+     * (active method-01 agents), in the same order. code => name.
+     *
+     * @param  mysqli $bdsis
+     * @return array
+     */
+    function bdsis_mic_agents($bdsis)
+    {
+        $out = array();
+        $res = ($bdsis instanceof mysqli)
+            ? $bdsis->query("SELECT code, antimicrobial_agent FROM ms_ast_table WHERE ast_method_id='01' AND status='1' ORDER BY antimicrobial_agent ASC")
+            : false;
+        if ($res) {
+            while (list($code, $agent) = $res->fetch_row()) { $out[(string)$code] = trim((string)$agent); }
+            $res->free();
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_prt3_owner')) {
+    /**
+     * Subject an E. coli pathotype record (rcdc_ecoli_pcr_result_table3) belongs
+     * to, or null when there is no such record.
+     *
+     * @return string|null
+     */
+    function bdsis_ecoli_prt3_owner($bdsis, $prt3rid)
+    {
+        $id = trim((string)$prt3rid);
+        if ($id === '' || !ctype_digit($id)) { return null; }
+        $q = $bdsis->prepare("SELECT p2.subject_id
+                                FROM rcdc_ecoli_pcr_result_table3 p3
+                                JOIN rcdc_ecoli_pcr_result_table2 p2 ON p2.record_id = p3.prt2_record_id
+                               WHERE p3.record_id = ?");
+        if (!$q) { return null; }
+        $n = (int)$id;
+        $q->bind_param("i", $n);
+        $q->execute();
+        $q->bind_result($owner);
+        $found = $q->fetch();
+        $q->close();
+        return $found ? (string)$owner : null;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_mic_parse')) {
+    /**
+     * Validate one panel's posted MIC entries.
+     *
+     * @param  mysqli $bdsis
+     * @param  mixed  $posted  $_POST['mic'][<prt3rid>] (uuid => fields)
+     * @param  string $label   panel name for messages
+     * @return array 'ok' => bool, 'error' => string,
+     *               'rows' => list of array('uuid','code','value','result')
+     */
+    function bdsis_ecoli_mic_parse($bdsis, $posted, $label)
+    {
+        $fail = function ($msg) { return array('ok' => false, 'error' => $msg, 'rows' => array()); };
+        $agents = bdsis_mic_agents($bdsis);
+        $interp = bdsis_mic_interpretations();
+        $rows = array();
+        $seenCode = array();
+        $seenUuid = array();
+        $n = 0;
+        foreach ((is_array($posted) ? $posted : array()) as $uuid => $f) {
+            $n++;
+            if (!is_array($f)) { return $fail($label . ': MIC entry ' . $n . ' is malformed.'); }
+            $code = (isset($f['code']) && !is_array($f['code'])) ? strtoupper(trim((string)$f['code'])) : '';
+            $raw  = isset($f['value']) ? $f['value'] : '';
+            $ic   = (isset($f['interp']) && !is_array($f['interp'])) ? strtoupper(trim((string)$f['interp'])) : '';
+
+            if ($code === '' || !isset($agents[$code])) {
+                return $fail($label . ': choose the antibiotic for MIC entry ' . $n . '.');
+            }
+            $name = $agents[$code];
+            if (isset($seenCode[$code])) {
+                return $fail($label . ': ' . $name . ' is entered more than once. Each antibiotic may appear only once.');
+            }
+            $value = bdsis_mic_normalize_value($raw);
+            if ($value === null) {
+                return $fail($label . ': enter a valid MIC value for ' . $name . ' (for example 2, <=0.5, >64 or 0.5/9.5).');
+            }
+            if (!isset($interp[$ic])) {
+                return $fail($label . ': choose the interpretation for ' . $name . ' (S, I, R, SDD or N/A).');
+            }
+            /* The client's id is kept when it is a well-formed, unrepeated v4 UUID;
+               otherwise the entry simply gets a fresh one. */
+            $uuid = strtolower((string)$uuid);
+            if (!bdsis_uuid_v4_valid($uuid) || isset($seenUuid[$uuid])) { $uuid = bdsis_uuid_v4(); }
+
+            $seenCode[$code] = true;
+            $seenUuid[$uuid] = true;
+            $rows[] = array('uuid' => $uuid, 'code' => $code, 'value' => $value, 'result' => $interp[$ic]);
+        }
+        if (count($rows) === 0) {
+            return $fail($label . ': MIC is selected but no antibiotic has been added. Add at least one, or choose another method.');
+        }
+        return array('ok' => true, 'error' => '', 'rows' => $rows);
+    }
+}
+
+if (!function_exists('bdsis_ecoli_mic_load')) {
+    /**
+     * Saved MIC entries of one pathotype record, in entry order, in the schema
+     * the form uses (interpretation as its code). A row with no stored id is
+     * given one for display; it is written back on the next save.
+     *
+     * @return array list of array('id','antibioticId','antibioticName','micValue','interpretation')
+     */
+    function bdsis_ecoli_mic_load($bdsis, $prt3rid)
+    {
+        $out = array();
+        $id = trim((string)$prt3rid);
+        if ($id === '' || !ctype_digit($id)) { return $out; }
+        $toCode = array_flip(bdsis_mic_interpretations());
+        $agents = bdsis_mic_agents($bdsis);
+        $q = $bdsis->prepare("SELECT entry_uuid, antimicrobial_code, zone_diameter, ast_result
+                                FROM rcdc_ecoli_pcr_ast_table
+                               WHERE prt3_record_id = ? AND ast_method_id = ?
+                               ORDER BY record_id ASC");
+        if (!$q) { return $out; }
+        $n = (int)$id;
+        $m = bdsis_mic_method_id();
+        $q->bind_param("is", $n, $m);
+        $q->execute();
+        $q->bind_result($uuid, $code, $value, $result);
+        while ($q->fetch()) {
+            $code = (string)$code;
+            $out[] = array(
+                'id'             => bdsis_uuid_v4_valid((string)$uuid) ? (string)$uuid : bdsis_uuid_v4(),
+                'antibioticId'   => $code,
+                'antibioticName' => isset($agents[$code]) ? $agents[$code] : $code,
+                'micValue'       => (string)$value,
+                'interpretation' => isset($toCode[(string)$result]) ? $toCode[(string)$result] : '',
+            );
+        }
+        $q->close();
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_ecoli_mic_row_html')) {
+    /**
+     * One MIC entry row. $entry uses the load() schema; an id of '__UUID__'
+     * builds the client-side template the Add button clones.
+     *
+     * @return string
+     */
+    function bdsis_ecoli_mic_row_html($prt3rid, $entry, $agents)
+    {
+        $h    = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $p    = (string)$prt3rid;
+        $u    = (string)$entry['id'];
+        $cur  = (string)$entry['antibioticId'];
+        $base = 'mic[' . $p . '][' . $u . ']';
+        $idp  = 'mic_' . $p . '_' . $u;
+
+        $opts = '<option value="">Select Antibiotic</option>';
+        foreach ($agents as $code => $name) {
+            $opts .= '<option value="' . $h($code) . '"' . ((string)$code === $cur ? ' selected' : '') . '>' . $h($name) . ' (' . $h($code) . ')</option>';
+        }
+        /* A saved code no longer in the active list stays visible and selected. */
+        if ($cur !== '' && !isset($agents[$cur])) {
+            $opts .= '<option value="' . $h($cur) . '" selected>' . $h($entry['antibioticName']) . ' (no longer active)</option>';
+        }
+        $iopts = '<option value="">Select</option>';
+        foreach (bdsis_mic_interpretation_labels() as $code => $label) {
+            $iopts .= '<option value="' . $h($code) . '"' . ($code === (string)$entry['interpretation'] ? ' selected' : '') . '>' . $h($label) . '</option>';
+        }
+
+        return '<div class="row lr-line lr-mic__row" data-mic-id="' . $h($u) . '">'
+            . '<div class="col-md-5 lr-cell form-group"><label class="lr-cell-label" for="' . $h($idp) . '_code">Antibiotic:</label>'
+            . '<select class="form-control lr-mic__code" name="' . $h($base) . '[code]" id="' . $h($idp) . '_code" required onchange="bdsisMicSync(this);">' . $opts . '</select></div>'
+            . '<div class="col-6 col-md-3 lr-cell form-group"><label class="lr-cell-label" for="' . $h($idp) . '_value">MIC (µg/mL):</label>'
+            . '<input type="text" class="form-control text-center lr-mic__value" name="' . $h($base) . '[value]" id="' . $h($idp) . '_value"'
+            /* Client pattern MUST accept the same values bdsis_mic_normalize_value()
+               accepts on the server, else the browser blocks entries the save path
+               would happily store. Grammar mirror: optional comparator, a number,
+               an optional range (a-b), an optional combination-agent split (/a-b),
+               and an optional trailing "^" (client-supplied marker; semantics TBC
+               with the customer, stored verbatim for now). maxlength stays at the
+               column's 10-char cap. */
+            . ' value="' . $h($entry['micValue']) . '" maxlength="10" required autocomplete="off" spellcheck="false" placeholder="e.g. &lt;=0.5, 16^, 0.12-0.5^"'
+            . ' pattern="\s*(&lt;=|&gt;=|&lt;|&gt;|=|≤|≥)?\s*\d+(\.\d+)?(-\d+(\.\d+)?)?(\s*/\s*\d+(\.\d+)?(-\d+(\.\d+)?)?)?\s*\^?\s*"'
+            . ' data-msg-pattern="Enter a number (e.g. 16), optionally with a comparator (&lt;=, &gt;=, &lt;, &gt;, =), an optional range (0.12-0.5), an optional combination-agent split (0.5/9.5), and an optional trailing ^ (e.g. 16^)." /></div>'
+            . '<div class="col-6 col-md-3 lr-cell form-group"><label class="lr-cell-label" for="' . $h($idp) . '_interp">Interpretation:</label>'
+            . '<select class="form-control lr-pill-select lr-mic__interp" name="' . $h($base) . '[interp]" id="' . $h($idp) . '_interp" required>' . $iopts . '</select></div>'
+            . '<div class="col-md-1 lr-cell lr-cell--action">'
+            . '<button type="button" class="btn lr-btn-icon lr-btn-danger-soft" title="Remove this antibiotic" aria-label="Remove this antibiotic" onclick="bdsisMicRemove(this);">'
+            . '<i class="fas fa-trash-alt" aria-hidden="true"></i></button></div>'
+            . '</div>';
+    }
+}
+
+if (!function_exists('bdsis_ecoli_mic_panel_html')) {
+    /**
+     * The MIC entry panel for one pathotype record, as load-ecoli-ast.php
+     * returns it into the panel's container.
+     *
+     * @return string
+     */
+    function bdsis_ecoli_mic_panel_html($bdsis, $prt3rid)
+    {
+        $h = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $p = trim((string)$prt3rid);
+        if ($p === '' || !ctype_digit($p)) {
+            return '<div class="lr-mic"><div class="lr-help"><i class="fas fa-info-circle" aria-hidden="true"></i>'
+                 . '<span>Save the PCR result first; MIC entries are recorded against it.</span></div></div>';
+        }
+        $agents  = bdsis_mic_agents($bdsis);
+        $entries = bdsis_ecoli_mic_load($bdsis, $p);
+        $blank   = array('id' => '__UUID__', 'antibioticId' => '', 'antibioticName' => '', 'micValue' => '', 'interpretation' => '');
+
+        $rows = '';
+        foreach ($entries as $e) { $rows .= bdsis_ecoli_mic_row_html($p, $e, $agents); }
+
+        return '<div class="lr-mic" data-mic-panel="' . $h($p) . '" data-mic-max="' . count($agents) . '">'
+            . '<div class="lr-subcard lr-subcard--mic">'
+            . '<div class="lr-subcard__head"><h4 class="lr-subcard__title">MIC Results</h4>'
+            . '<span class="lr-subcard__meta">Minimum inhibitory concentration, µg/mL &middot; <span class="lr-mic__count">' . count($entries) . '</span> of ' . count($agents) . ' antibiotics</span></div>'
+            . '<div class="row lr-grid-head d-none d-md-flex">'
+            . '<div class="col-md-5">Antibiotic <span class="required-star" aria-hidden="true">*</span></div>'
+            . '<div class="col-md-3">MIC (µg/mL) <span class="required-star" aria-hidden="true">*</span></div>'
+            . '<div class="col-md-3">Interpretation <span class="required-star" aria-hidden="true">*</span></div>'
+            . '<div class="col-md-1"><span class="sr-only">Remove</span></div></div>'
+            . '<div class="lr-mic__rows">' . $rows . '</div>'
+            . '<div class="lr-mic__empty"' . (count($entries) ? ' style="display:none;"' : '') . '>'
+            . '<i class="fas fa-vial" aria-hidden="true"></i><span>No antibiotics added yet. Add each antibiotic tested by MIC.</span></div>'
+            . '<div class="lr-mic__actions">'
+            . '<button type="button" class="btn lr-btn-add lr-mic__add" onclick="bdsisMicAdd(this);"><i class="fas fa-plus" aria-hidden="true"></i>Add Antibiotic</button>'
+            . '</div>'
+            . '<template class="lr-mic__tpl">' . bdsis_ecoli_mic_row_html($p, $blank, $agents) . '</template>'
+            . '<div class="lr-help"><i class="fas fa-info-circle" aria-hidden="true"></i><span>'
+            . 'Enter the MIC as read, with its comparator where there is one (&lt;=0.5, 16, &gt;64; 0.5/9.5 for a combination agent). '
+            . 'The interpretation is stated by the reader &mdash; it is not calculated. Each antibiotic may be entered once.</span></div>'
+            . '</div></div>';
+    }
+}

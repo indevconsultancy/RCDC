@@ -1,0 +1,440 @@
+<?php ob_start(); /* Buffer the page so a refused role returns a real 403, not a 200
+     carrying a half-built page: header.php below emits <!DOCTYPE> before the
+     authorisation guard runs, and bdsis_deny() discards this buffer to answer
+     cleanly. Same guard-ordering fix as records/case.php and lab/lab.php. */ ?>
+<!-- Check session -->
+<?php require_once("../config/session.php"); ?>
+<!-- Page header -->
+<?php require_once("../includes/header.php"); ?>
+<!-- Database Connection -->
+<?php
+  require_once("../config/commondb-config.php");
+  require_once("../config/db-config.php");
+  require_once("../includes/rbac.php");
+  bdsis_require_can('report', null, 'reports');
+  // Report helpers; also pulls in includes/lab-helpers.php, which the listing
+  // below uses for the ELISA genotype labels.
+  require_once("report-html-builder.php");
+  // Shared subject-list query, including the facility restriction.
+  require_once("report-subject-filter.php");
+?>
+<!-- CSS-JQuery -->
+<?php require_once("../includes/css-jquery.php"); ?>
+
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+    <!-- Top Navbar -->
+    <?php require_once("../includes/top-navbar.php"); ?>
+    <!-- Main Sidebar Container -->
+    <?php require_once("../includes/sidebar-menu.php"); ?>
+
+<!-- Content Wrapper. Contains page content -->
+<div class="content-wrapper">
+    <!-- Content Header (Page header) -->
+    <section class="content-header">
+        <div class="container-fluid">
+            <div class="row mb-2">
+                <div class="col-sm-6">
+                    <h1>Group Report</h1>
+                </div>
+                <div class="col-sm-6">
+                    <ol class="breadcrumb float-sm-right">
+                        <li class="breadcrumb-item"><a href="../dashboard/dashboard.php">Dashboard</a></li>
+                        <li class="breadcrumb-item active">Group Report</li>
+                    </ol>
+                </div>
+            </div>
+        </div><!-- /.container-fluid -->
+    </section>
+
+    <!-- Main content -->
+    <section class="content">
+        <div class="container-fluid">
+            <!-- One form wraps both cards: the template selector in the filter
+                 panel and the ticked subjects in the table below are posted
+                 together to report-group-pdf.php. Selections are tracked in JS and
+                 written into hidden inputs on submit, because DataTables keeps only
+                 the current page in the DOM. -->
+            <form id="groupForm" method="post" action="report-group-pdf.php" target="_blank">
+                <!-- Filter panel: the Subject Type select, the Generate button and the
+                     selection badge on one row, in the same card + .search-filters bar
+                     as the Records screen. The report template is fixed to the "Result
+                     Template for Outbreak/Group Report" through the hidden input below;
+                     the template selector this page used to carry has been removed. -->
+                <style>
+                    /* Page-local layout for the three controls. The shared .search-filters
+                       rules already pin the select, the button and the badge to one height
+                       (calc(2.25rem + 2px)); these only size the field, bottom-align the
+                       row so the controls share a baseline under the label, and space the
+                       actions evenly. Scoped to #groupFilters so nothing else is touched. */
+                    #groupFilters { align-items: flex-end; }
+                    #groupFilters > .form-group { margin-bottom: 0; }
+                    #groupFilters > .grp-type { flex: 0 1 240px; min-width: 200px; max-width: 260px; }
+                    #groupFilters > .search-actions { gap: 12px; margin-left: 4px; }
+                    #groupFilters .col-form-label-sm { margin-bottom: .35rem; }
+                    @media (max-width: 575.98px) {
+                        #groupFilters > .grp-type { flex: 1 1 100%; max-width: none; }
+                        /* justify-content: the shared bar rule right-aligns the actions,
+                           which only shows once they wrap onto their own line. */
+                        #groupFilters > .search-actions { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; margin-left: 0; margin-top: 10px; }
+                    }
+                </style>
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="row search-filters" id="groupFilters">
+                                    <input type="hidden" name="template" value="group_result" />
+
+                                    <!-- Subject Type -->
+                                    <div class="form-group grp-type">
+                                        <label class="col-form-label-sm" for="subject_type">Subject Type:</label>
+                                        <select class="form-control" name="subject_type" id="subject_type">
+                                            <option value="">All</option>
+                                            <option value="1">Surveillance</option>
+                                            <option value="2">Outbreak</option>
+                                        </select>
+                                    </div>
+
+                                    <!-- Generate + selection count -->
+                                    <div class="form-group search-actions">
+                                        <button type="submit" id="groupBtn" class="btn bg-gradient-primary">
+                                            <i class="fa fa-file-pdf"></i>&nbsp;Generate Group Report
+                                        </button>
+                                        <span id="selCount" class="sel-count-badge">No subject selected</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Subject table -->
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Select Subjects</h3>
+                            </div>
+                            <div class="card-body">
+                            <div id="selHidden"></div>
+<?php
+                                    // No filter form on this screen -- an empty filter set is
+                                    // passed so the shared query still applies the facility
+                                    // restriction and the row cap. Narrowing is done with the
+                                    // table's own search box, which searches every loaded row,
+                                    // not just the visible page.
+                                    $subjectqry = bdsis_report_subject_sql($commondb, array(), $acl, $usercat, $_SESSION["ctid"]);
+                                    $result = $bdsis->query($subjectqry);
+
+                                    /* Collect the listed subjects first: the result columns are
+                                       fetched in ONE batch per source for the whole list below,
+                                       not with a query per row. */
+                                    $grpRows = array();
+                                    if ($result) {
+                                        while(list($sid,$name,$sex,$age,$cno,$cat,$cid,$opdt)=$result->fetch_row()){
+                                            $grpRows[] = array('sid'=>(string)$sid, 'name'=>(string)$name, 'sex'=>(string)$sex,
+                                                               'age'=>(string)$age, 'cat'=>(string)$cat, 'opdt'=>(string)$opdt);
+                                        }
+                                    }
+                                    $listed = count($grpRows);
+
+                                    /* Result columns, by the same rules as the PDF's Result Template
+                                       for Outbreak/Group Report: bacteriology = isolated pathogens in
+                                       slot order; PCR = positive E.coli pathotypes, else the
+                                       isolate-level result; ELISA = positive/equivocal viruses (with
+                                       genotype), else the status; antibiotics = S/I/R from both AST
+                                       panels, "/"-joined when both tested the same drug. Anything
+                                       absent shows "-". Every query is guarded, so a failed lookup
+                                       leaves a dash rather than a broken page. */
+                                    $grpDash  = '-';
+                                    $grpCodes = array('AMP', 'CZO', 'LEX', 'CIP');
+                                    $grpBact = array(); $grpPcrPos = array(); $grpPcrOther = array();
+                                    $grpElisaPos = array(); $grpElisaOther = array(); $grpAst = array();
+                                    if ($listed > 0) {
+                                        $grpEsc = array();
+                                        foreach ($grpRows as $gr) { $grpEsc[] = "'" . $bdsis->real_escape_string($gr['sid']) . "'"; }
+                                        $grpIn = implode(',', $grpEsc);
+                                        $grpEach = function ($sql, $fn) use ($bdsis) {
+                                            $res = $bdsis->query($sql);
+                                            if (!$res) { return; }
+                                            while ($row = $res->fetch_row()) { $fn($row); }
+                                            $res->free();
+                                        };
+                                        $grpEach("SELECT b.subject_id, COALESCE(NULLIF(m.enteric_pathogen,''), b.pathogen_id)
+                                                    FROM bacteriology_result_table2 b
+                                                    LEFT JOIN ms_enteric_bacterial_pathogen_table m ON m.pathogen_id = b.pathogen_id
+                                                   WHERE b.subject_id IN (" . $grpIn . ")
+                                                   ORDER BY b.subject_id, CAST(SUBSTRING(b.e_pathogen,2) AS UNSIGNED), b.record_id",
+                                            function ($r) use (&$grpBact) {
+                                                $n = trim((string)$r[1]);
+                                                if ($n !== '') { $grpBact[$r[0]][$n] = true; }
+                                            });
+                                        $grpEach("SELECT p2.subject_id, p2.ecoli_strain_result, s.ecoli_strain, p3.strain_result
+                                                    FROM rcdc_ecoli_pcr_result_table2 p2
+                                                    LEFT JOIN rcdc_ecoli_pcr_result_table3 p3 ON p3.prt2_record_id = p2.record_id
+                                                    LEFT JOIN ms_ecoli_strain_table s ON s.strain_id = p3.ecoli_strain_id
+                                                   WHERE p2.subject_id IN (" . $grpIn . ")
+                                                   ORDER BY p2.subject_id, p2.record_id, p3.ecoli_strain_id",
+                                            function ($r) use (&$grpPcrPos, &$grpPcrOther) {
+                                                $strain = trim((string)$r[2]);
+                                                if ((string)$r[3] === 'Positive' && $strain !== '') { $grpPcrPos[$r[0]][$strain] = true; }
+                                                $lvl = trim((string)$r[1]);
+                                                if ($lvl !== '') { $grpPcrOther[$r[0]][$lvl] = true; }
+                                            });
+                                        $grpEach("SELECT e.subject_id, COALESCE(NULLIF(v.virus,''), e.virus_id), e.elisa_result, e.genotype_id
+                                                    FROM rcdc_elisa_result_table2 e
+                                                    LEFT JOIN ms_virus_table v ON v.virus_id = e.virus_id
+                                                   WHERE e.subject_id IN (" . $grpIn . ")
+                                                   ORDER BY e.subject_id, e.virus_id",
+                                            function ($r) use (&$grpElisaPos, &$grpElisaOther, $bdsis) {
+                                                $virus = trim((string)$r[1]);
+                                                $rslt  = trim((string)$r[2]);
+                                                if ($rslt === 'Positive' || $rslt === 'Equivocal') {
+                                                    $label = $virus;
+                                                    $geno  = '';
+                                                    if (function_exists('bdsis_rotavirus_genotype_label') && (string)$r[3] !== '') {
+                                                        $geno = trim((string)bdsis_rotavirus_genotype_label($bdsis, $r[3]));
+                                                    }
+                                                    if ($geno !== '') { $label .= ' (' . $geno . ')'; }
+                                                    if ($rslt === 'Equivocal') { $label .= ': Equivocal'; }
+                                                    if ($label !== '') { $grpElisaPos[$r[0]][$label] = true; }
+                                                } elseif ($rslt !== '') {
+                                                    $grpElisaOther[$r[0]][$rslt] = true;
+                                                }
+                                            });
+                                        $grpCollect = function ($r) use (&$grpAst) {
+                                            $code = strtoupper(trim((string)$r[1]));
+                                            if ($code === '') { return; }
+                                            $map = array('SUSCEPTIBLE' => 'S', 'INTERMEDIATE' => 'I', 'RESISTANT' => 'R');
+                                            $raw = strtoupper(trim((string)$r[2]));
+                                            $val = isset($map[$raw]) ? $map[$raw] : trim((string)$r[2]);
+                                            if ($val === '') { return; }
+                                            $grpAst[$r[0]][$code][$val] = true;
+                                        };
+                                        $grpEach("SELECT b.subject_id, a.antimicrobial_code, a.ast_result
+                                                    FROM bacteriology_ast_table a
+                                                    JOIN bacteriology_result_table2 b ON b.record_id = a.brt2_id
+                                                   WHERE b.subject_id IN (" . $grpIn . ")", $grpCollect);
+                                        $grpEach("SELECT p2.subject_id, pa.antimicrobial_code, pa.ast_result
+                                                    FROM rcdc_ecoli_pcr_ast_table pa
+                                                    JOIN rcdc_ecoli_pcr_result_table3 p3 ON p3.record_id = pa.prt3_record_id
+                                                    JOIN rcdc_ecoli_pcr_result_table2 p2 ON p2.record_id = p3.prt2_record_id
+                                                   WHERE p2.subject_id IN (" . $grpIn . ")", $grpCollect);
+                                    }
+                                    $grpJoin = function ($arr, $sep = ', ') use ($grpDash) {
+                                        return (is_array($arr) && count($arr) > 0) ? implode($sep, array_keys($arr)) : $grpDash;
+                                    };
+                                    /* "Negative" wins over Not Done / Pending when both were recorded. */
+                                    $grpStatus = function ($arr) use ($grpDash) {
+                                        if (!is_array($arr) || count($arr) === 0) { return $grpDash; }
+                                        if (isset($arr['Negative'])) { return 'Negative'; }
+                                        return implode(', ', array_keys($arr));
+                                    };
+                                    $grpH = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+
+                                    /* An antibiotic column is drawn only when at least one listed
+                                       subject has a result for it. A column of nothing but "-" tells
+                                       the reader nothing, so it is dropped from the header and from
+                                       every row. Same rule the PDF applies. */
+                                    $grpVisibleCodes = array();
+                                    foreach ($grpCodes as $grpCode) {
+                                        foreach ($grpAst as $grpSidAst) {
+                                            if (isset($grpSidAst[$grpCode])) { $grpVisibleCodes[] = $grpCode; break; }
+                                        }
+                                    }
+                                    $grpNAbx = count($grpVisibleCodes);
+?>
+                            <table id="table" class="table table-bordered table-hover">
+                                <thead>
+                                    <!-- Same layout as the PDF "Result Template for Outbreak/Group
+                                         Report", minus the Subject Type column. The Subject Type
+                                         filter above the table still POSTs to report-group-pdf.php
+                                         to narrow the generated PDF; it no longer narrows this
+                                         on-screen list, because there is no column here for the
+                                         client-side filter to search. There is no Last Updated On
+                                         column either -- it was hidden the same way and showed a
+                                         FOUC flash on a hard refresh, and nothing else used it. -->
+<?php $rs = $grpNAbx > 0 ? ' rowspan="2"' : ''; ?>
+                                    <tr class="text-center">
+                                        <th<?=$rs;?> style="width:34px;"><input type="checkbox" id="checkAll" title="Select all (all pages)" /></th>
+                                        <th<?=$rs;?>>Sample ID</th>
+                                        <th<?=$rs;?>>Name</th>
+                                        <th<?=$rs;?>>Age/Sex</th>
+                                        <th<?=$rs;?>>Bacteriology result</th>
+                                        <th<?=$rs;?>>PCR result</th>
+                                        <th<?=$rs;?>>ELISA result</th>
+<?php if ($grpNAbx > 0): ?>
+                                        <th colspan="<?=$grpNAbx;?>">Antibiotics</th>
+<?php endif; ?>
+                                    </tr>
+<?php if ($grpNAbx > 0): ?>
+                                    <tr class="text-center">
+                                        <?php foreach ($grpVisibleCodes as $grpCode){ echo '<th>'.htmlspecialchars($grpCode, ENT_QUOTES).($grpCode === 'CIP' ? '*' : '').'</th>'; } ?>
+                                    </tr>
+<?php endif; ?>
+                                </thead>
+                                <tbody>
+                                <?php
+
+                                    foreach ($grpRows as $gr) {
+                                        $sid = $gr['sid'];
+                                        $ageSex    = trim($gr['age'] . (($gr['age'] !== '' && $gr['sex'] !== '') ? ' / ' : '') . $gr['sex']);
+                                        $bactText  = isset($grpBact[$sid]) ? $grpJoin($grpBact[$sid]) : $grpDash;
+                                        $pcrText   = isset($grpPcrPos[$sid]) ? $grpJoin($grpPcrPos[$sid])
+                                                   : (isset($grpPcrOther[$sid]) ? $grpStatus($grpPcrOther[$sid]) : $grpDash);
+                                        $elisaText = isset($grpElisaPos[$sid]) ? $grpJoin($grpElisaPos[$sid])
+                                                   : (isset($grpElisaOther[$sid]) ? $grpStatus($grpElisaOther[$sid]) : $grpDash);
+                                        echo("<tr>");
+                                        echo("<td class='text-center'><input type='checkbox' class='subjChk' value='".$grpH($sid)."' /></td>");
+                                        echo("<td>".$grpH($sid)."</td>");
+                                        echo("<td>".$grpH($gr['name'])."</td>");
+                                        echo("<td class='text-center'>".($ageSex !== '' ? $grpH($ageSex) : $grpDash)."</td>");
+                                        echo("<td>".$grpH($bactText)."</td>");
+                                        echo("<td>".$grpH($pcrText)."</td>");
+                                        echo("<td>".$grpH($elisaText)."</td>");
+                                        foreach ($grpVisibleCodes as $code) {
+                                            echo("<td class='text-center'>".$grpH(isset($grpAst[$sid][$code]) ? $grpJoin($grpAst[$sid][$code], '/') : $grpDash)."</td>");
+                                        }
+                                        echo("</tr>");
+                                    }
+                                ?>
+                            </tbody>
+                            </table>
+                            <?php
+                                /* Say so when the cap is reached, rather than letting a
+                                   truncated list read as "these are all the subjects". */
+                                if ($listed >= 500) {
+                                    echo('<small class="text-muted">Showing the 500 most recently recorded subjects. '
+                                       . 'Use the search box above to find a subject within this list.</small>');
+                                } else {
+                                    echo('<small class="text-muted">' . $listed . ' subject' . ($listed === 1 ? '' : 's') . ' available.</small>');
+                                }
+                            ?>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+      <!-- /.container-fluid -->
+    </section>
+    <!-- /.content -->
+</div>
+<!-- /.content-wrapper -->
+<script>
+$(function () {
+    // Column 0 is the selection checkbox; 1 Sample ID; 2 Name; 3 Age/Sex;
+    // 4 Bacteriology; 5 PCR; 6 ELISA; then ONE COLUMN PER ANTIBIOTIC THAT HAS
+    // DATA. The Subject Type column and its client-side filter binding were
+    // removed; the Subject Type dropdown above the table still POSTs to
+    // report-group-pdf.php so the generated PDF's server-side filter is
+    // unchanged.
+    var table = $('#table').DataTable({
+    "paging": true,
+    "lengthChange": true,
+    "searching": true,
+    "ordering": true,
+    "info": true,
+    "autoWidth": false,
+    "responsive": true,
+    "columnDefs": [
+        { "targets": 0, "orderable": false, "searchable": false }
+    ],
+    /* No default sort: the rows arrive from the query already ordered
+       (recorded_on DESC, subject_id DESC), and the Last Updated On column that
+       used to drive the default sort is gone. Clicking a header still sorts
+       exactly as before. */
+    "order": []
+    });
+
+    /* ----------------------------------------------------------------
+       Multi-page selection.
+
+       DataTables keeps only the current page in the DOM, so reading the
+       ticked checkboxes at submit time would silently lose everything the
+       user picked on other pages. The authoritative selection therefore
+       lives in this object, and the checkboxes are just a view of it:
+         - ticking/unticking updates the object
+         - every redraw re-applies the object to the visible checkboxes
+         - submit serialises the object into hidden inputs
+       ---------------------------------------------------------------- */
+    var selected = {};
+
+    function selectedIds() { return Object.keys(selected); }
+
+    function refreshCount() {
+        var n = selectedIds().length;
+        // Text is unchanged; .has-selection just swaps the badge from neutral to
+        // the primary accent once something is picked (styled in bdsis-theme.css).
+        $('#selCount')
+            .text(n === 0 ? 'No subject selected'
+                          : n + ' subject' + (n === 1 ? '' : 's') + ' selected')
+            .toggleClass('has-selection', n > 0);
+    }
+
+    function syncVisible() {
+        var allTicked = true, any = false;
+        $('#table tbody input.subjChk').each(function () {
+            var on = !!selected[this.value];
+            this.checked = on;
+            any = true;
+            if (!on) { allTicked = false; }
+        });
+        $('#checkAll').prop('checked', any && allTicked);
+    }
+
+    /* The Subject Type dropdown no longer filters the on-screen list -- the
+       column it searched has been removed -- but the dropdown is still POSTed
+       to report-group-pdf.php on submit, so the generated PDF filters by it
+       server-side exactly as before. Nothing else needs to happen on change. */
+
+    $('#table tbody').on('change', 'input.subjChk', function () {
+        if (this.checked) { selected[this.value] = true; }
+        else { delete selected[this.value]; }
+        refreshCount();
+        syncVisible();
+    });
+
+    // Select-all applies to every row matching the current search/filter,
+    // not just the visible page.
+    $('#checkAll').on('change', function () {
+        var on = this.checked;
+        table.rows({ search: 'applied' }).nodes().to$().find('input.subjChk').each(function () {
+            if (on) { selected[this.value] = true; }
+            else { delete selected[this.value]; }
+        });
+        refreshCount();
+        syncVisible();
+    });
+
+    table.on('draw', syncVisible);
+
+    $('#groupForm').on('submit', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) {
+            // Swal rather than alert() to match the rest of the app.
+            if (window.Swal) {
+                Swal.fire({
+                    icon: 'info',
+                    title: 'No subject selected',
+                    text: 'Tick at least one subject in the list below, then generate the report.',
+                    confirmButtonText: 'OK'
+                });
+            } else {
+                alert('Please select at least one subject to include in the group report.');
+            }
+            return false;
+        }
+        var box = $('#selHidden').empty();
+        $.each(ids, function (i, id) {
+            box.append($('<input>', { type: 'hidden', name: 'sids[]' }).val(id));
+        });
+        return true;
+    });
+
+    refreshCount();
+});
+</script>
+<!-- Page footer -->
+<?php require_once("../includes/footer.php"); ?>

@@ -1,0 +1,735 @@
+<?php
+	require_once("../config/session.php");
+    require_once("../config/commondb-config.php");
+require_once(__DIR__."/../includes/lab-helpers.php");   // bdsis_rotavirus_genotype_label()
+    require_once("../config/db-config.php");
+	// Download script: never emit PHP warnings/notices into the .xls output (it corrupts the file).
+	ini_set('display_errors', '0');
+	ini_set('max_execution_time', '300');
+
+	$file="BDSIS_RAW_DATA_ALL.xls";
+	$rpt="";
+
+	/* ------------------------------------------------------------------
+	   Bacteriology now supports an unlimited number of pathogens per
+	   subject, so the P1/P2/P3 columns are generated dynamically. The
+	   number of slots is the largest pathogen count across the subjects
+	   being exported (never fewer than 3, so an export that contains no
+	   subject with more than three pathogens is byte-for-byte identical
+	   to the previous fixed layout).
+	   ------------------------------------------------------------------ */
+	$cid=$_REQUEST["facility"] ?? 'All'; $dtfrm=$_REQUEST["dtfrm"] ?? ''; $dtto=$_REQUEST["dtto"] ?? ''; $category=$_REQUEST["category"] ?? 'All';
+
+/* Scope the extract server-side. The facility came from a posted value and a
+ * client-supplied `uacl` hidden field that was read once and never used, so a
+ * facility user could post facility=All and pull the national dataset. A
+ * non-national role is now pinned to its own centre whatever it posts. */
+require_once(__DIR__."/../includes/rbac.php");
+bdsis_require_can('export');
+$bdsisExportCentre = bdsis_export_centre();
+if($bdsisExportCentre !== null){ $cid = $bdsisExportCentre; }
+/* The four lookups below run on $bdsis but read the common database, so they
+   have to name it. They said "commondb", which is not what it is called on this
+   server -- the query returned false and the ->fetch_row() chained onto it was
+   fatal, which is the 500 this page returned for every export. */
+$cdb = bdsis_commondb_name();
+	$subjWhere=" subject_id<>'' ";
+	if($cid!="All"){ $subjWhere.=" AND center_id='".$cid."'"; }
+	if($category!="All"){ $subjWhere.=" AND subject_category='".$category."'"; }
+	if($dtfrm!="" AND $dtto!=""){ $subjWhere.=" AND hospital_visit_date>='".$dtfrm."' AND hospital_visit_date<='".$dtto."'"; }
+
+	$bactAgents=array('AMX','AMP','CZO','CRO','LEX','CHL','CIP','GEN','NAL','TCY','SXT');
+	$maxPathogenSlots=3;
+	$maxSlotQry=$bdsis->query("SELECT MAX(cnt) FROM (SELECT COUNT(*) cnt FROM bacteriology_result_table2 WHERE subject_id IN (SELECT subject_id FROM subject_information_table WHERE ".$subjWhere.") GROUP BY subject_id) x");
+	if($maxSlotQry){
+		$maxSlotRow=$maxSlotQry->fetch_row();
+		if($maxSlotRow AND (int)$maxSlotRow[0]>$maxPathogenSlots){ $maxPathogenSlots=(int)$maxSlotRow[0]; }
+	}
+
+	$bactHdr="";
+	for($p=1;$p<=$maxPathogenSlots;$p++){
+		$bactHdr.="<th>Pathogen".$p."</th><th>Pathogen".$p." Status</th><th>Processed".$p." by</th>";
+		foreach($bactAgents as $ag){
+			$bactHdr.="<th>P".$p." ".$ag."m</th><th>P".$p." ".$ag."zd</th><th>P".$p." ".$ag."r</th>";
+		}
+	}
+
+                $rpt.="<table cellpadding='0' cellspacing='0' border='1' width='100%'>
+						<tr>
+							<th>Subject ID</th>							
+							<th>Site</th>
+							<th>Name</th>
+							<th>Gender</th>
+							<th>Age (Months)</th>
+							<th>Contact No.</th>
+							<th>Category</th>
+							<th>Occupation</th>
+							<th>Residential Addr</th>
+							<th>Dzongkhag</th>
+							<th>Last Updated On</th>
+							<th>IPD/OPD</th>
+							<th>Hospital Visit Date</th>
+							<th>Illness Onset</th>
+							<th>Diarrhoea Duration</th>
+							<th>Suspected Food?</th>
+							<th>Food Name</th>
+							<th>T History</th>
+							<th>T Place</th>
+							<th>T Date</th>
+							<th>Stool Character</th>
+							<th>Colour</th>
+							<th>Mucus</th>
+							<th>Blood</th>
+							<th>WBC</th>
+							<th>RBC</th>
+							<th>OVAC</th>
+							<th>Others</th>
+							<th>Processed By</th>
+							<th>Processed On</th>
+							".$bactHdr."
+							
+							<th>LF Strain</th>
+							<th>LF Pby</th>
+							<th>LF Pon</th>
+							
+							<th>LF EAEC   </th>
+							<th>LF EIEC   </th>
+							<th>LF EPEC   </th>
+							<th>LF ETEC   </th>
+							<th>LF STEC   </th>
+							<th>LF EHEC   </th>
+							<th>LF NonDEC</th>
+							<th>LF NR    </th>
+							
+							<th>LF EAEC AMXr</th>
+							<th>LF EIEC AMXr</th>
+							<th>LF EPEC AMXr</th>
+							<th>LF ETEC AMXr</th>
+							<th>LF STEC AMXr</th>
+							<th>LF EHEC AMXr</th>
+							
+							<th>LF EAEC AMPr</th>
+							<th>LF EIEC AMPr</th>
+							<th>LF EPEC AMPr</th>
+							<th>LF ETEC AMPr</th>
+							<th>LF STEC AMPr</th>
+							<th>LF EHEC AMPr</th>
+							
+							<th>LF EAEC CZOr</th>
+							<th>LF EIEC CZOr</th>
+							<th>LF EPEC CZOr</th>
+							<th>LF ETEC CZOr</th>
+							<th>LF STEC CZOr</th>
+							<th>LF EHEC CZOr</th>
+							
+							<th>LF EAEC CROr</th>
+							<th>LF EIEC CROr</th>
+							<th>LF EPEC CROr</th>
+							<th>LF ETEC CROr</th>
+							<th>LF STEC CROr</th>
+							<th>LF EHEC CROr</th>
+							
+							<th>LF EAEC LEXr</th>
+							<th>LF EIEC LEXr</th>
+							<th>LF EPEC LEXr</th>
+							<th>LF ETEC LEXr</th>
+							<th>LF STEC LEXr</th>
+							<th>LF EHEC LEXr</th>
+							
+							<th>LF EAEC CHLr</th>
+							<th>LF EIEC CHLr</th>
+							<th>LF EPEC CHLr</th>
+							<th>LF ETEC CHLr</th>
+							<th>LF STEC CHLr</th>
+							<th>LF EHEC CHLr</th>
+							
+							<th>LF EAEC CIPr</th>
+							<th>LF EIEC CIPr</th>
+							<th>LF EPEC CIPr</th>
+							<th>LF ETEC CIPr</th>
+							<th>LF STEC CIPr</th>
+							<th>LF EHEC CIPr</th>
+							
+							<th>LF EAEC GENr</th>
+							<th>LF EIEC GENr</th>
+							<th>LF EPEC GENr</th>
+							<th>LF ETEC GENr</th>
+							<th>LF STEC GENr</th>
+							<th>LF EHEC GENr</th>
+							
+							<th>LF EAEC NALr</th>
+							<th>LF EIEC NALr</th>
+							<th>LF EPEC NALr</th>
+							<th>LF ETEC NALr</th>
+							<th>LF STEC NALr</th>
+							<th>LF EHEC NALr</th>
+							
+							<th>LF EAEC TCYr</th>
+							<th>LF EIEC TCYr</th>
+							<th>LF EPEC TCYr</th>
+							<th>LF ETEC TCYr</th>
+							<th>LF STEC TCYr</th>
+							<th>LF EHEC TCYr</th>
+							
+							<th>LF EAEC SXTr</th>
+							<th>LF EIEC SXTr</th>
+							<th>LF EPEC SXTr</th>
+							<th>LF ETEC SXTr</th>
+							<th>LF STEC SXTr</th>
+							<th>LF EHEC SXTr</th>
+							
+							<th>NLF Strain</th>
+							<th>NLF Pby</th>
+							<th>NLF Pon</th>
+							
+							<th>NLF EAEC   </th>
+							<th>NLF EIEC   </th>
+							<th>NLF EPEC   </th>
+							<th>NLF ETEC   </th>
+							<th>NLF STEC   </th>
+							<th>NLF EHEC   </th>
+							<th>NLF NonDEC</th>
+							<th>NLF NR    </th>
+							
+							<th>NLF EAEC AMXr</th>
+							<th>NLF EIEC AMXr</th>
+							<th>NLF EPEC AMXr</th>
+							<th>NLF ETEC AMXr</th>
+							<th>NLF STEC AMXr</th>
+							<th>NLF EHEC AMXr</th>
+							
+							<th>NLF EAEC AMPr</th>
+							<th>NLF EIEC AMPr</th>
+							<th>NLF EPEC AMPr</th>
+							<th>NLF ETEC AMPr</th>
+							<th>NLF STEC AMPr</th>
+							<th>NLF EHEC AMPr</th>
+							
+							<th>NLF EAEC CZOr</th>
+							<th>NLF EIEC CZOr</th>
+							<th>NLF EPEC CZOr</th>
+							<th>NLF ETEC CZOr</th>
+							<th>NLF STEC CZOr</th>
+							<th>NLF EHEC CZOr</th>
+							
+							<th>NLF EAEC CROr</th>
+							<th>NLF EIEC CROr</th>
+							<th>NLF EPEC CROr</th>
+							<th>NLF ETEC CROr</th>
+							<th>NLF STEC CROr</th>
+							<th>NLF EHEC CROr</th>
+							
+							<th>NLF EAEC LEXr</th>
+							<th>NLF EIEC LEXr</th>
+							<th>NLF EPEC LEXr</th>
+							<th>NLF ETEC LEXr</th>
+							<th>NLF STEC LEXr</th>
+							<th>NLF EHEC LEXr</th>
+							
+							<th>NLF EAEC CHLr</th>
+							<th>NLF EIEC CHLr</th>
+							<th>NLF EPEC CHLr</th>
+							<th>NLF ETEC CHLr</th>
+							<th>NLF STEC CHLr</th>
+							<th>NLF EHEC CHLr</th>
+							
+							<th>NLF EAEC CIPr</th>
+							<th>NLF EIEC CIPr</th>
+							<th>NLF EPEC CIPr</th>
+							<th>NLF ETEC CIPr</th>
+							<th>NLF STEC CIPr</th>
+							<th>NLF EHEC CIPr</th>
+							
+							<th>NLF EAEC GENr</th>
+							<th>NLF EIEC GENr</th>
+							<th>NLF EPEC GENr</th>
+							<th>NLF ETEC GENr</th>
+							<th>NLF STEC GENr</th>
+							<th>NLF EHEC GENr</th>
+							
+							<th>NLF EAEC NALr</th>
+							<th>NLF EIEC NALr</th>
+							<th>NLF EPEC NALr</th>
+							<th>NLF ETEC NALr</th>
+							<th>NLF STEC NALr</th>
+							<th>NLF EHEC NALr</th>
+							
+							<th>NLF EAEC TCYr</th>
+							<th>NLF EIEC TCYr</th>
+							<th>NLF EPEC TCYr</th>
+							<th>NLF ETEC TCYr</th>
+							<th>NLF STEC TCYr</th>
+							<th>NLF EHEC TCYr</th>
+							
+							<th>NLF EAEC SXTr</th>
+							<th>NLF EIEC SXTr</th>
+							<th>NLF EPEC SXTr</th>
+							<th>NLF ETEC SXTr</th>
+							<th>NLF STEC SXTr</th>
+							<th>NLF EHEC SXTr</th>
+							
+							<th>Adenovirus							</th>
+							<th>Astrovirus							</th>
+							<th>Cryptosporidium						</th>
+							<th>Giardia Lamblia						</th>
+							<th>Rotavirus							</th>
+							<th>Rotavirus Genotype					</th>
+							<th>Norovirus							</th>
+							<th>Sapovirus							</th>
+							<th>Giardia Lamblia/Cryptosporidium		</th>
+
+						</tr>";	
+						
+						/* Filters and $subjWhere were parsed above, before the header block. */
+						$qry="SELECT subject_id,subject_name,gender,age,contact_no,subject_category,recorded_on,record_updated_on,center_id,dzongkhag_code,occupation_code,residental_address,hospital_visit_date FROM subject_information_table WHERE ".$subjWhere;
+						$qry.=" ORDER BY subject_id DESC";
+						$runqry=$bdsis->query($qry);
+						
+						while(list($sid,$name,$sex,$age,$cno,$categ,$recdt,$uptdt,$ctid,$dzid,$occuid,$raddr,$dohv)=$runqry->fetch_row()){
+                            if($categ==2){$catgry = "Outbreak";}else{$catgry = "Surveillance";}
+							$ccode=$bdsis->query("SELECT center_code FROM ".$cdb.".ms_health_center_table WHERE center_id='".$ctid."'");
+                            list($ccode)=$ccode->fetch_row();
+
+							list($dzname)=$bdsis->query("SELECT dzongkhag_name FROM ".$cdb.".ms_dzongkhag_table WHERE dzongkhag_code='".$dzid."'")->fetch_row();
+							list($occu)=$bdsis->query("SELECT value FROM ".$cdb.".ms_occupation_table WHERE id='".$occuid."'")->fetch_row();
+							list($cStatus,$iOnset,$sChar,$dDur,$fSuspectSts,$fSuspectn,$thStatus,$tPlace,$tDate)=$bdsis->query("SELECT clinic_visit_status, date_illness_onset, stool_charateristices, diarrhea_duration, food_suspect_status, food_suspect_name, travel_history_status, travel_place, travel_date FROM case_clinical_information_table WHERE subject_id='".$sid."'")->fetch_row();
+							
+							list($color,$mucus,$blood,$wbc,$rbc,$ovac,$others,$processedById,$processed_on)=$bdsis->query("SELECT color, mucus, blood, wbc, rbc, ova_cyst, others, processed_by, processed_on FROM microscopy_result_table WHERE subject_id='".$sid."'")->fetch_row();
+							list($processed_by)=$bdsis->query("SELECT fullname FROM ".$cdb.".user_profile_table WHERE username='".$processedById."'")->fetch_row();
+							// GAY-18-002
+							/* Bacteriology: one column block per pathogen, ordered by the
+							   numeric part of e_pathogen so P10 follows P9. Subjects with
+							   fewer pathogens than $maxPathogenSlots are padded with empty
+							   cells so every data row keeps the header's width. */
+							$bactBody="";
+							$bactSlots=0;
+							$bactRes=$bdsis->query("SELECT record_id, pathogen_id, ast_status, processed_by FROM bacteriology_result_table2 WHERE subject_id='".$sid."' ORDER BY CAST(SUBSTRING(e_pathogen,2) AS UNSIGNED) ASC, record_id ASC");
+							if($bactRes){
+								while($bactRow=$bactRes->fetch_row()){
+									if($bactSlots>=$maxPathogenSlots){ break; }
+									$bactSlots++;
+									$pBrId=$bactRow[0]; $pPathId=$bactRow[1]; $pAstSts=$bactRow[2]; $pProcBy=$bactRow[3];
+
+									$pNameRes=$bdsis->query("SELECT enteric_pathogen FROM ms_enteric_bacterial_pathogen_table WHERE pathogen_id='".$pPathId."'");
+									$pNameRow=$pNameRes?$pNameRes->fetch_row():null;
+									$pPathName=$pNameRow?$pNameRow[0]:'';
+
+									/* processed_by is free text now (its FK was dropped), so emit it as stored. */
+									$bactBody.="<td>$pPathName</td><td>$pAstSts</td><td>$pProcBy</td>";
+
+									foreach($bactAgents as $ag){
+										$agRes=$bdsis->query("SELECT ast_method_id, zone_diameter, ast_result FROM bacteriology_ast_table WHERE brt2_id='".$pBrId."' AND antimicrobial_code='".$ag."'");
+										$agRow=$agRes?$agRes->fetch_row():null;
+										$agM=$agRow?$agRow[0]:''; $agZd=$agRow?$agRow[1]:''; $agR=$agRow?$agRow[2]:'';
+										$bactBody.="<td>$agM</td><td>$agZd</td><td>$agR</td>";
+									}
+								}
+							}
+							for($p=$bactSlots;$p<$maxPathogenSlots;$p++){
+								$bactBody.="<td></td><td></td><td></td>";
+								foreach($bactAgents as $ag){ $bactBody.="<td></td><td></td><td></td>"; }
+							}
+							
+							if($uptdt=="" OR $uptdt==NULL){$opdt=$recdt;} else{$opdt=$uptdt;}
+							$chksamp="";
+							$rpt.=("<tr>");
+							$rpt.=("<td>$sid</td>");
+							$rpt.=("<td>$ccode</td>");							
+							$rpt.=("<td>$name</td>");
+							$rpt.=("<td>$sex</td>");
+							$rpt.=("<td>$age</td>");
+							$rpt.=("<td>$cno</td>");
+							$rpt.=("<td>$catgry</td>");
+							$rpt.=("<td>$occu</td>");
+							$rpt.=("<td>$raddr</td>");
+							$rpt.=("<td>$dzname</td>");
+							$rpt.=("<td>$opdt</td>");
+							$rpt.=("<td>$cStatus</td>");
+							$rpt.=("<td>$dohv</td>");
+							$rpt.=("<td>$iOnset</td>");
+							$rpt.=("<td>$dDur</td>");
+							$rpt.=("<td>$fSuspectSts</td>");
+							$rpt.=("<td>$fSuspectn</td>");
+							$rpt.=("<td>$thStatus</td>");
+							$rpt.=("<td>$tPlace</td>");
+							$rpt.=("<td>$tDate</td>");
+							$rpt.=("<td>$sChar</td>");
+							$rpt.=("<td>$color</td>");
+							$rpt.=("<td>$mucus</td>");
+							$rpt.=("<td>$blood</td>");
+							$rpt.=("<td>$wbc</td>");
+							$rpt.=("<td>$rbc</td>");
+							$rpt.=("<td>$ovac</td>");
+							$rpt.=("<td>$others</td>");
+							$rpt.=("<td>$processed_by</td>");
+							$rpt.=("<td>$processed_on</td>");
+							$rpt.=$bactBody;
+							
+							list($lfid,$lfstrain,$lfprocBy,$lfprocOn)=$bdsis->query("SELECT record_id, ecoli_strain_result, processed_by, processed_on FROM rcdc_ecoli_pcr_result_table2 WHERE ecoli_id='025' AND subject_id='".$sid."'")->fetch_row();
+							
+							list($lfEAEC,$lfEAECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='01'")->fetch_row();
+							list($lfEIEC,$lfEIECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='02'")->fetch_row();
+							list($lfEPEC,$lfEPECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='03'")->fetch_row();
+							list($lfETEC,$lfETECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='04'")->fetch_row();
+							list($lfSTEC,$lfSTECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='05'")->fetch_row();
+							list($lfEHEC,$lfEHECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='06'")->fetch_row();
+							list($lfNonDEC,$lfNonDECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='98'")->fetch_row();
+							list($lfNR,$lfNRr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$lfid."' AND ecoli_strain_id='99'")->fetch_row();							
+							
+							$rpt.=("<td>$lfstrain</td>");
+							$rpt.=("<td>$lfprocBy</td>");
+							$rpt.=("<td>$lfprocOn</td>");
+							
+							$rpt.=("<td>$lfEAECr  </td>");
+							$rpt.=("<td>$lfEIECr  </td>");
+							$rpt.=("<td>$lfEPECr  </td>");
+							$rpt.=("<td>$lfETECr  </td>");
+							$rpt.=("<td>$lfSTECr  </td>");
+							$rpt.=("<td>$lfEHECr  </td>");
+							$rpt.=("<td>$lfNonDECr</td>");
+							$rpt.=("<td>$lfNRr    </td>");
+							
+							list($LFEAECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($LFEIECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($LFEPECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($LFETECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($LFSTECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($LFEHECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							$rpt.=("<td>$LFEAECAMXr</td>");
+							$rpt.=("<td>$LFEIECAMXr</td>");
+							$rpt.=("<td>$LFEPECAMXr</td>");
+							$rpt.=("<td>$LFETECAMXr</td>");
+							$rpt.=("<td>$LFSTECAMXr</td>");
+							$rpt.=("<td>$LFEHECAMXr</td>");
+							
+							list($LFEAECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($LFEIECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($LFEPECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($LFETECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($LFSTECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($LFEHECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							$rpt.=("<td>$LFEAECAMPr</td>");
+							$rpt.=("<td>$LFEIECAMPr</td>");
+							$rpt.=("<td>$LFEPECAMPr</td>");
+							$rpt.=("<td>$LFETECAMPr</td>");
+							$rpt.=("<td>$LFSTECAMPr</td>");
+							$rpt.=("<td>$LFEHECAMPr</td>");
+							
+							list($LFEAECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($LFEIECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($LFEPECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($LFETECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($LFSTECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($LFEHECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							$rpt.=("<td>$LFEAECCZOr</td>");
+							$rpt.=("<td>$LFEIECCZOr</td>");
+							$rpt.=("<td>$LFEPECCZOr</td>");
+							$rpt.=("<td>$LFETECCZOr</td>");
+							$rpt.=("<td>$LFSTECCZOr</td>");
+							$rpt.=("<td>$LFEHECCZOr</td>");
+							
+							list($LFEAECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($LFEIECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($LFEPECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($LFETECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($LFSTECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($LFEHECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							$rpt.=("<td>$LFEAECCROr</td>");
+							$rpt.=("<td>$LFEIECCROr</td>");
+							$rpt.=("<td>$LFEPECCROr</td>");
+							$rpt.=("<td>$LFETECCROr</td>");
+							$rpt.=("<td>$LFSTECCROr</td>");
+							$rpt.=("<td>$LFEHECCROr</td>");
+							
+							list($LFEAECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($LFEIECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($LFEPECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($LFETECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($LFSTECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($LFEHECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							$rpt.=("<td>$LFEAECLEXr</td>");
+							$rpt.=("<td>$LFEIECLEXr</td>");
+							$rpt.=("<td>$LFEPECLEXr</td>");
+							$rpt.=("<td>$LFETECLEXr</td>");
+							$rpt.=("<td>$LFSTECLEXr</td>");
+							$rpt.=("<td>$LFEHECLEXr</td>");
+							
+							list($LFEAECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($LFEIECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($LFEPECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($LFETECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($LFSTECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($LFEHECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							$rpt.=("<td>$LFEAECCHLr</td>");
+							$rpt.=("<td>$LFEIECCHLr</td>");
+							$rpt.=("<td>$LFEPECCHLr</td>");
+							$rpt.=("<td>$LFETECCHLr</td>");
+							$rpt.=("<td>$LFSTECCHLr</td>");
+							$rpt.=("<td>$LFEHECCHLr</td>");
+							
+							list($LFEAECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($LFEIECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($LFEPECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($LFETECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($LFSTECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($LFEHECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							$rpt.=("<td>$LFEAECCIPr</td>");
+							$rpt.=("<td>$LFEIECCIPr</td>");
+							$rpt.=("<td>$LFEPECCIPr</td>");
+							$rpt.=("<td>$LFETECCIPr</td>");
+							$rpt.=("<td>$LFSTECCIPr</td>");
+							$rpt.=("<td>$LFEHECCIPr</td>");
+							
+							list($LFEAECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($LFEIECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($LFEPECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($LFETECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($LFSTECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($LFEHECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							$rpt.=("<td>$LFEAECGENr</td>");
+							$rpt.=("<td>$LFEIECGENr</td>");
+							$rpt.=("<td>$LFEPECGENr</td>");
+							$rpt.=("<td>$LFETECGENr</td>");
+							$rpt.=("<td>$LFSTECGENr</td>");
+							$rpt.=("<td>$LFEHECGENr</td>");
+							
+							list($LFEAECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($LFEIECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($LFEPECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($LFETECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($LFSTECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($LFEHECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							$rpt.=("<td>$LFEAECNALr</td>");
+							$rpt.=("<td>$LFEIECNALr</td>");
+							$rpt.=("<td>$LFEPECNALr</td>");
+							$rpt.=("<td>$LFETECNALr</td>");
+							$rpt.=("<td>$LFSTECNALr</td>");
+							$rpt.=("<td>$LFEHECNALr</td>");
+							
+							list($LFEAECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($LFEIECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($LFEPECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($LFETECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($LFSTECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($LFEHECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							$rpt.=("<td>$LFEAECTCYr</td>");
+							$rpt.=("<td>$LFEIECTCYr</td>");
+							$rpt.=("<td>$LFEPECTCYr</td>");
+							$rpt.=("<td>$LFETECTCYr</td>");
+							$rpt.=("<td>$LFSTECTCYr</td>");
+							$rpt.=("<td>$LFEHECTCYr</td>");
+							
+							list($LFEAECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEAEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($LFEIECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEIEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($LFEPECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEPEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($LFETECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfETEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($LFSTECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfSTEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($LFEHECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$lfEHEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							$rpt.=("<td>$LFEAECSXTr</td>");
+							$rpt.=("<td>$LFEIECSXTr</td>");
+							$rpt.=("<td>$LFEPECSXTr</td>");
+							$rpt.=("<td>$LFETECSXTr</td>");
+							$rpt.=("<td>$LFSTECSXTr</td>");
+							$rpt.=("<td>$LFEHECSXTr</td>");
+							
+							list($nlfid,$nlfstrain,$nlfprocBy,$nlfprocOn)=$bdsis->query("SELECT record_id, ecoli_strain_result, processed_by, processed_on FROM rcdc_ecoli_pcr_result_table2 WHERE ecoli_id='026' AND subject_id='".$sid."'")->fetch_row();
+							
+							list($nlfEAEC,$nlfEAECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='01'")->fetch_row();
+							list($nlfEIEC,$nlfEIECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='02'")->fetch_row();
+							list($nlfEPEC,$nlfEPECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='03'")->fetch_row();
+							list($nlfETEC,$nlfETECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='04'")->fetch_row();
+							list($nlfSTEC,$nlfSTECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='05'")->fetch_row();
+							list($nlfEHEC,$nlfEHECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='06'")->fetch_row();
+							list($nlfNonDEC,$nlfNonDECr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='98'")->fetch_row();
+							list($nlfNR,$nlfNRr)=$bdsis->query("SELECT record_id, strain_result FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id='".$nlfid."' AND ecoli_strain_id='99'")->fetch_row();
+							
+							$rpt.=("<td>$nlfstrain</td>");
+							$rpt.=("<td>$nlfprocBy</td>");
+							$rpt.=("<td>$nlfprocOn</td>");
+							
+							$rpt.=("<td>$nlfEAECr  </td>");
+							$rpt.=("<td>$nlfEIECr  </td>");
+							$rpt.=("<td>$nlfEPECr  </td>");
+							$rpt.=("<td>$nlfETECr  </td>");
+							$rpt.=("<td>$nlfSTECr  </td>");
+							$rpt.=("<td>$nlfEHECr  </td>");
+							$rpt.=("<td>$nlfNonDECr</td>");
+							$rpt.=("<td>$nlfNRr    </td>");
+							
+							list($nLFEAECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($nLFEIECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($nLFEPECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($nLFETECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($nLFSTECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							list($nLFEHECAMXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='AMX'")->fetch_row();
+							$rpt.=("<td>$nLFEAECAMXr</td>");
+							$rpt.=("<td>$nLFEIECAMXr</td>");
+							$rpt.=("<td>$nLFEPECAMXr</td>");
+							$rpt.=("<td>$nLFETECAMXr</td>");
+							$rpt.=("<td>$nLFSTECAMXr</td>");
+							$rpt.=("<td>$nLFEHECAMXr</td>");
+							
+							list($nLFEAECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($nLFEIECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($nLFEPECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($nLFETECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($nLFSTECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							list($nLFEHECAMPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='AMP'")->fetch_row();
+							$rpt.=("<td>$nLFEAECAMPr</td>");
+							$rpt.=("<td>$nLFEIECAMPr</td>");
+							$rpt.=("<td>$nLFEPECAMPr</td>");
+							$rpt.=("<td>$nLFETECAMPr</td>");
+							$rpt.=("<td>$nLFSTECAMPr</td>");
+							$rpt.=("<td>$nLFEHECAMPr</td>");
+							
+							list($nLFEAECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($nLFEIECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($nLFEPECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($nLFETECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($nLFSTECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							list($nLFEHECCZOr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='CZO'")->fetch_row();
+							$rpt.=("<td>$nLFEAECCZOr</td>");
+							$rpt.=("<td>$nLFEIECCZOr</td>");
+							$rpt.=("<td>$nLFEPECCZOr</td>");
+							$rpt.=("<td>$nLFETECCZOr</td>");
+							$rpt.=("<td>$nLFSTECCZOr</td>");
+							$rpt.=("<td>$nLFEHECCZOr</td>");
+							
+							list($nLFEAECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($nLFEIECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($nLFEPECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($nLFETECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($nLFSTECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							list($nLFEHECCROr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='CRO'")->fetch_row();
+							$rpt.=("<td>$nLFEAECCROr</td>");
+							$rpt.=("<td>$nLFEIECCROr</td>");
+							$rpt.=("<td>$nLFEPECCROr</td>");
+							$rpt.=("<td>$nLFETECCROr</td>");
+							$rpt.=("<td>$nLFSTECCROr</td>");
+							$rpt.=("<td>$nLFEHECCROr</td>");
+							
+							list($nLFEAECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($nLFEIECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($nLFEPECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($nLFETECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($nLFSTECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							list($nLFEHECLEXr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='LEX'")->fetch_row();
+							$rpt.=("<td>$nLFEAECLEXr</td>");
+							$rpt.=("<td>$nLFEIECLEXr</td>");
+							$rpt.=("<td>$nLFEPECLEXr</td>");
+							$rpt.=("<td>$nLFETECLEXr</td>");
+							$rpt.=("<td>$nLFSTECLEXr</td>");
+							$rpt.=("<td>$nLFEHECLEXr</td>");
+							
+							list($nLFEAECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($nLFEIECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($nLFEPECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($nLFETECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($nLFSTECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							list($nLFEHECCHLr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='CHL'")->fetch_row();
+							$rpt.=("<td>$nLFEAECCHLr</td>");
+							$rpt.=("<td>$nLFEIECCHLr</td>");
+							$rpt.=("<td>$nLFEPECCHLr</td>");
+							$rpt.=("<td>$nLFETECCHLr</td>");
+							$rpt.=("<td>$nLFSTECCHLr</td>");
+							$rpt.=("<td>$nLFEHECCHLr</td>");
+							
+							list($nLFEAECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($nLFEIECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($nLFEPECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($nLFETECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($nLFSTECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							list($nLFEHECCIPr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='CIP'")->fetch_row();
+							$rpt.=("<td>$nLFEAECCIPr</td>");
+							$rpt.=("<td>$nLFEIECCIPr</td>");
+							$rpt.=("<td>$nLFEPECCIPr</td>");
+							$rpt.=("<td>$nLFETECCIPr</td>");
+							$rpt.=("<td>$nLFSTECCIPr</td>");
+							$rpt.=("<td>$nLFEHECCIPr</td>");
+							
+							list($nLFEAECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($nLFEIECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($nLFEPECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($nLFETECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($nLFSTECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							list($nLFEHECGENr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='GEN'")->fetch_row();
+							$rpt.=("<td>$nLFEAECGENr</td>");
+							$rpt.=("<td>$nLFEIECGENr</td>");
+							$rpt.=("<td>$nLFEPECGENr</td>");
+							$rpt.=("<td>$nLFETECGENr</td>");
+							$rpt.=("<td>$nLFSTECGENr</td>");
+							$rpt.=("<td>$nLFEHECGENr</td>");
+							
+							list($nLFEAECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($nLFEIECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($nLFEPECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($nLFETECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($nLFSTECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							list($nLFEHECNALr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='NAL'")->fetch_row();
+							$rpt.=("<td>$nLFEAECNALr</td>");
+							$rpt.=("<td>$nLFEIECNALr</td>");
+							$rpt.=("<td>$nLFEPECNALr</td>");
+							$rpt.=("<td>$nLFETECNALr</td>");
+							$rpt.=("<td>$nLFSTECNALr</td>");
+							$rpt.=("<td>$nLFEHECNALr</td>");
+							
+							list($nLFEAECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($nLFEIECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($nLFEPECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($nLFETECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($nLFSTECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							list($nLFEHECTCYr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='TCY'")->fetch_row();
+							$rpt.=("<td>$nLFEAECTCYr</td>");
+							$rpt.=("<td>$nLFEIECTCYr</td>");
+							$rpt.=("<td>$nLFEPECTCYr</td>");
+							$rpt.=("<td>$nLFETECTCYr</td>");
+							$rpt.=("<td>$nLFSTECTCYr</td>");
+							$rpt.=("<td>$nLFEHECTCYr</td>");
+							
+							list($nLFEAECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEAEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($nLFEIECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEIEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($nLFEPECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEPEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($nLFETECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfETEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($nLFSTECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfSTEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							list($nLFEHECSXTr)=$bdsis->query("SELECT ast_result FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$nlfEHEC."' AND antimicrobial_code='SXT'")->fetch_row();
+							$rpt.=("<td>$nLFEAECSXTr</td>");
+							$rpt.=("<td>$nLFEIECSXTr</td>");
+							$rpt.=("<td>$nLFEPECSXTr</td>");
+							$rpt.=("<td>$nLFETECSXTr</td>");
+							$rpt.=("<td>$nLFSTECSXTr</td>");
+							$rpt.=("<td>$nLFEHECSXTr</td>");
+							
+							list($Adenovirus)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='01'")->fetch_row();
+							list($Astrovirus)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='02'")->fetch_row();
+							list($Cryptosporidium)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='03'")->fetch_row();
+							list($GiardiaLamblia)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='04'")->fetch_row();
+							/* Rotavirus carries the genotype, so it is fetched as a row rather
+							   than a single column. Guarded because fetch_row() returns null when
+							   the subject has no ELISA record -- list() on null warns, which the
+							   other seven lines here still do silently. The id is resolved to its
+							   display name so the spreadsheet shows "G1P[8]", not "001". */
+							$rotaRow = $bdsis->query("SELECT elisa_result, genotype_id FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='05'")->fetch_row();
+							$Rotavirus         = $rotaRow ? $rotaRow[0] : '';
+							$RotavirusGenotype = ($rotaRow && $rotaRow[1] !== null && $rotaRow[1] !== '')
+							                       ? bdsis_rotavirus_genotype_label($bdsis, $rotaRow[1]) : '';
+							list($Norovirus)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='06'")->fetch_row();
+							list($Sapovirus)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='07'")->fetch_row();
+							list($GLC)=$bdsis->query("SELECT elisa_result FROM rcdc_elisa_result_table2 WHERE subject_id='".$sid."' AND virus_id='08'")->fetch_row();
+							
+							$rpt.=("<td>$Adenovirus</td>");
+							$rpt.=("<td>$Astrovirus</td>");
+							$rpt.=("<td>$Cryptosporidium</td>");
+							$rpt.=("<td>$GiardiaLamblia</td>");
+							$rpt.=("<td>$Rotavirus</td>");
+							$rpt.=("<td>$RotavirusGenotype</td>");
+							$rpt.=("<td>$Norovirus</td>");
+							$rpt.=("<td>$Sapovirus</td>");
+							$rpt.=("<td>$GLC</td>");
+							
+							$rpt.=("</tr>");
+						}
+						//MODIFY Table Title and Data-header for AST and Virus as in UDWQMIS					
+                $rpt=$rpt."</table>";
+	header("Content-Disposition: attachment; filename=\"$file\"");
+	header("Content-Type: application/vnd.ms-excel");
+	echo $rpt;

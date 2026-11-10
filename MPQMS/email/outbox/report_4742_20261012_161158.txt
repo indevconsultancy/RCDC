@@ -1,0 +1,23 @@
+=== MPQMS OUTCOME NOTIFICATION ===
+Timestamp      : 2026-10-12 16:11:53
+Registration   : 4742
+Outcome        : COMPLIES
+To             : anupampal1307@gmail.com
+Subject        : MPQMS Test Outcome [COMPLIES] - Sample NMPTL/BUM/2026/2
+Delivery status: anupampal1307@gmail.com: DELIVERED via smtp after 1 attempt(s)
+----- MESSAGE -----
+This is an official communication from the National Medical Product Testing Laboratory (NMPTL) (MPQMS).
+
+A laboratory test result has been verified and approved with the following final outcome:
+
+  Final Outcome   : COMPLIES
+  Sample ID       : NMPTL/BUM/2026/2
+  Batch Number    : 2222
+  Pharma Claim    : f
+  Label Claim Amt : 
+  Remarks         : fbdfbdfbf
+
+This sample COMPLIES with the applicable standards.
+
+The official analytical report is retained in the MPQMS report archive.
+

@@ -1,0 +1,859 @@
+<?php
+	require_once("../config/session.php");
+	require_once("../config/db-config.php"); 
+	require_once("../includes/lab-helpers.php");
+	require_once("../includes/rbac.php");
+	require_once("../includes/csrf.php");
+	require_once("../includes/lab-workflow.php");
+	$user=$_SESSION["users"];
+	/* commondb's login is shared by ten surveillance systems, so these keys carry
+	   whichever one the user last entered, and none of them is set when the user
+	   arrived from a system that never wrote them -- "Undefined array key" under
+	   PHP 8. It also matters for more than a warning: the lab-site check below
+	   reads $acl/$usercat/$cid, so another system's role decided whether a health
+	   worker could write results here. The BDSIS row is the authority. */
+	$me = bdsis_identity(); $cid=$me['centre']; $acl=$me['acl']; $usercat=$me['usercat'];
+
+    $submit = $bdsis -> real_escape_string($_POST['submit']);
+    $action = $bdsis -> real_escape_string($_POST['action']);
+    $errmsg = '';
+    /* null = no handler has decided yet, so a request whose $submit matches nothing
+       reports failure instead of warning on an undefined variable. */
+    $check = null;
+
+    /* Authorise the record before any lab result is written. This endpoint had
+       no role check at all: the form is only reachable from a page that gates
+       access, but the POST target was open to anyone logged in. */
+    bdsis_require_module();
+    bdsis_csrf_require();     // POST-only: reject a save this session did not open
+    $postedSid = isset($_POST["sid"]) ? $bdsis->real_escape_string($_POST["sid"]) : '';
+    if($postedSid === ''){ bdsis_deny('No laboratory record was specified.'); }
+    bdsis_require_subject($bdsis, $postedSid);
+
+    /* Which laboratory section is being saved decides which permission applies.
+       The endpoint used to ask a single question -- "may you edit bacteriology?"
+       -- for all four forms, so a role permitted to edit one section could post
+       to any of them. */
+    $sectionOf = array(
+        'bacteriologyResult' => array('bacteriology', 'bacteriology'),
+        'eColiPcrResult'     => array('pcr',          'pcr'),
+        'ecoliAstResult'     => array('ast',          'ast'),
+        'eLISAResult'        => array('elisa',        'elisa'),
+    );
+    if (!isset($sectionOf[$submit])) { bdsis_deny('Unrecognised laboratory form.', 'save'); }
+    list($labModule, $labSection) = $sectionOf[$submit];
+
+    /* Verified and Approved records are read-only. Returned-for-correction is
+       not: reopening the record for editing is the point of returning it. */
+    if (bdsis_lab_is_locked($bdsis, $postedSid)) {
+        bdsis_deny('This laboratory record has been verified and is now read-only. '
+                 . 'It must be returned for correction before it can be changed.',
+                   'edit-locked', $labModule);
+    }
+
+    /* Creating a section that holds no data yet is Add; changing one that does is
+       Edit. The district role may correct what a facility entered but may not
+       originate laboratory records, and that distinction is only visible here. */
+    $sectionsPresent = bdsis_lab_sections($bdsis, $postedSid);
+    $isNewSection    = empty($sectionsPresent[$labSection]);
+    bdsis_require_can($isNewSection ? 'add' : 'edit', null, $labModule);
+
+    /* Workflow ordering: PCR after bacteriology, AST after a positive PCR, ELISA
+       after AST. Only enforced when the section is being created -- an existing
+       result stays correctable whatever order it was originally entered in. */
+    if ($isNewSection && !bdsis_lab_section_open($bdsis, $postedSid, $labSection)) {
+        bdsis_deny(bdsis_lab_blocked_reason($labSection), 'workflow-order', $labModule);
+    }
+
+    /* Page assets load only once the caller is known to be entitled to write this
+       record. Loaded earlier, they sent the response headers first, so a refusal
+       arrived as HTTP 200 with a denial message in the body.
+       Skipped for an AJAX submit: it needs clean JSON at the end, not the popup
+       page's jQuery/CSS. */
+    if (strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'xmlhttprequest') {
+        require_once("../includes/css-jquery.php");
+    }
+
+    $labSites = array('016', '063', '128', '143', '997');
+    if ((string)$acl === '3' && (string)$usercat === '3' && !in_array((string)$cid, $labSites, true)) {
+        bdsis_deny('Your health facility is not configured to enter laboratory results.');
+    }
+    $today = date('Y-m-d');
+	$null = NULL;
+
+    if ($submit=='bacteriologyResult') {
+        $astMethodId='01';
+        $sid=$bdsis->real_escape_string($_POST["sid"]);
+        $remarks=$bdsis->real_escape_string($_POST["remarks"]);
+
+        /**
+         * The form posts an unbounded number of pathogen rows as arrays keyed
+         * by the row index used in the markup:
+         *   pathogen[i], status[i], proby[i], prodate[i], recid[i]
+         *   code[i][j], zone[i][j]
+         * Row indexes may contain gaps (a row removed in the browser); the
+         * surviving rows are compacted into e_pathogen P1..Pn by position.
+         */
+        $postedPathogens = (isset($_POST["pathogen"]) AND is_array($_POST["pathogen"])) ? $_POST["pathogen"] : null;
+        $postedStatus    = (isset($_POST["status"])   AND is_array($_POST["status"]))   ? $_POST["status"]   : array();
+        $postedProby     = (isset($_POST["proby"])    AND is_array($_POST["proby"]))    ? $_POST["proby"]    : array();
+        $postedProdate   = (isset($_POST["prodate"])  AND is_array($_POST["prodate"]))  ? $_POST["prodate"]  : array();
+        $postedRecid     = (isset($_POST["recid"])    AND is_array($_POST["recid"]))    ? $_POST["recid"]    : array();
+        $postedCode      = (isset($_POST["code"])     AND is_array($_POST["code"]))     ? $_POST["code"]     : array();
+        $postedZone      = (isset($_POST["zone"])     AND is_array($_POST["zone"]))     ? $_POST["zone"]     : array();
+
+        /* Conditional ESBL / carbapenemase (mCIM, eCIM) tests. The triggers are
+           re-derived here from the posted zones -- never trusted from the browser
+           -- and a triggered test that is incomplete refuses the whole save BEFORE
+           anything is written, so a rejected post leaves the record as it was.
+           Rows without an AST panel (E.coli, 101, Not Required) never trigger.
+           See bdsis_bact_resistance_plan() in includes/lab-helpers.php. */
+        $resistError = '';
+        $resistPlans = array();
+        if($postedPathogens!==null){
+            $resistBp  = bdsis_ast_breakpoints($bdsis);
+            $resistSeq = 0;
+            foreach($postedPathogens as $rowIdx=>$rawPathogen){
+                $rp=trim((string)$rawPathogen);
+                if($rp==="" OR $rp==="NR"){ continue; }
+                $resistSeq++;
+                $rs=isset($postedStatus[$rowIdx]) ? trim((string)$postedStatus[$rowIdx]) : '';
+                if($rp==="025" OR $rp==="026" OR $rp==="101" OR $rs==="NR"){ $resistPlans[$rowIdx]=null; continue; }
+                $plan=bdsis_bact_resistance_plan($bdsis, $rowIdx, 'Enteric Pathogen '.$resistSeq,
+                        (isset($postedCode[$rowIdx]) AND is_array($postedCode[$rowIdx])) ? $postedCode[$rowIdx] : array(),
+                        (isset($postedZone[$rowIdx]) AND is_array($postedZone[$rowIdx])) ? $postedZone[$rowIdx] : array(),
+                        $_POST, $resistBp);
+                if(!$plan['ok']){ $resistError=$plan['error']; break; }
+                $resistPlans[$rowIdx]=$plan;
+            }
+        }
+
+        /**
+         * if remarks exist, update. else insert the remarks
+         */
+        $chkqry=$bdsis->query("SELECT subject_id FROM bacteriology_result_table1 WHERE subject_id='".$sid."'");
+        if($chkqry->num_rows>0){
+            $rcdqry = $bdsis->prepare("UPDATE bacteriology_result_table1 SET remarks=? WHERE subject_id=?");
+            $rcdqry->bind_param("ss", $remarks, $sid);
+        }else{
+            $rcdqry = $bdsis->prepare("INSERT INTO bacteriology_result_table1(subject_id, remarks, record_created_on) VALUES (?, ?, ?)");
+            $rcdqry->bind_param("sss", $sid, $remarks, $today);
+        }
+
+        if($resistError === '' AND $rcdqry->execute()){
+            $check = true;
+
+            /* Guard: never wipe a subject's pathogens because the post carried
+               no pathogen[] array at all (stale/partial form). */
+            if($postedPathogens!==null){
+
+                /* Append-only mode.
+
+                   Once an E.coli PCR or AST result hangs off this subject, the
+                   pathogen rows it was derived from are fixed: the form renders
+                   them read-only and therefore does not post them. The replace
+                   semantics below would read that absence as a deletion and take
+                   the PCR/AST data down with them, so in this mode nothing is
+                   deleted, renumbered or updated -- only genuinely new rows are
+                   inserted, after the slots already in use. A posted row naming an
+                   existing record_id is ignored rather than applied, so a crafted
+                   post cannot edit a fixed row either. */
+                $bactAppendOnly = (chkeColiPcr($sid, $bdsis)==1 OR chkeColiAst($sid, $bdsis)==1);
+
+                /* Existing rows for this subject, keyed by record_id. */
+                $existingRows=array();
+                $exQry=$bdsis->query("SELECT record_id FROM bacteriology_result_table2 WHERE subject_id='".$sid."'");
+                if($exQry){
+                    while(list($exRid)=$exQry->fetch_row()){ $existingRows[(string)$exRid]=true; }
+                }
+
+                /* Normalise the posted rows we intend to keep, in order. */
+                $keep=array();
+                foreach($postedPathogens as $rowIdx=>$rawPathogen){
+                    $pathogen=trim((string)$rawPathogen);
+                    if($pathogen==="" OR $pathogen==="NR"){ continue; }
+                    $rowRecid=isset($postedRecid[$rowIdx]) ? trim((string)$postedRecid[$rowIdx]) : '';
+                    if($rowRecid==="" OR !isset($existingRows[$rowRecid])){ $rowRecid=''; }
+                    if($bactAppendOnly AND $rowRecid!==''){ continue; }   // fixed row: never re-applied
+                    $keep[]=array('idx'=>$rowIdx, 'pathogen'=>$pathogen, 'recid'=>$rowRecid);
+                }
+
+                /* 1. Drop the rows (and their AST children) that are gone.
+                      Skipped entirely while appending: a row that was not posted
+                      is a row the form deliberately withheld, not one removed. */
+                $keptRecIds=array();
+                if(!$bactAppendOnly){
+                foreach($keep as $k){
+                    if($k['recid']!==''){ $keptRecIds[$k['recid']]=true; }
+                }
+                foreach($existingRows as $exRid=>$exFlag){
+                    if(!isset($keptRecIds[$exRid])){
+                        $delRid=(int)$exRid;
+                        $delAstRow = $bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=?");
+                        $delAstRow->bind_param("i", $delRid);
+                        $delAstRow->execute();
+                        $delRow = $bdsis->prepare("DELETE FROM bacteriology_result_table2 WHERE record_id=?");
+                        $delRow->bind_param("i", $delRid);
+                        $delRow->execute();
+                    }
+                }
+                }
+
+                /* 2. Park the surviving rows on temporary e_pathogen slots.
+                      The natural key is (subject_id, pathogen_id, e_pathogen);
+                      re-ordering two rows that carry the SAME pathogen_id would
+                      otherwise collide half-way through the renumbering. */
+                $park=0;
+                if($bactAppendOnly){ $keep2=array(); foreach($keep as $k){ if($k['recid']===''){ $keep2[]=$k; } } $keep=$keep2; }
+                foreach($keep as $k){
+                    if($k['recid']===''){ continue; }
+                    $park++;
+                    $parkSlot='Z'.$park;
+                    $parkRid=(int)$k['recid'];
+                    $parkQry = $bdsis->prepare("UPDATE bacteriology_result_table2 SET e_pathogen=? WHERE record_id=?");
+                    $parkQry->bind_param("si", $parkSlot, $parkRid);
+                    $parkQry->execute();
+                }
+
+                /* 3. Upsert each surviving row into its final compact slot. */
+                $slot=0;
+                if($bactAppendOnly){
+                    /* Continue the P-numbering rather than restarting it: the rows
+                       already on file keep the slots they were saved under. */
+                    $slotQ=$bdsis->query("SELECT MAX(CAST(SUBSTRING(e_pathogen,2) AS UNSIGNED)) FROM bacteriology_result_table2 WHERE subject_id='".$sid."'");
+                    if($slotQ){ list($maxSlot)=$slotQ->fetch_row(); $slot=(int)$maxSlot; }
+                }
+                foreach($keep as $k){
+                    $slot++;
+                    $ePathogen='P'.$slot;
+                    $rowIdx=$k['idx'];
+                    $pathogen=$bdsis->real_escape_string($k['pathogen']);
+
+                    /* For E.coli (025 LF / 026 NLF) the AST field records whether
+                       the E.coli PCR Result section applies to the isolate, so
+                       only the exact values 'Positive' and 'Negative' are stored.
+                       Anything else -- blank, junk, an injected value -- falls back
+                       to 'NR', which is what every pre-existing E.coli row holds,
+                       so nothing can be corrupted.
+                       101 ("No Enteric Bacterial Pathogen Isolated") and NR keep
+                       being forced to NR; their select is disabled client-side and
+                       is not posted. */
+                    $isEcoliPathogen = ($pathogen=="025" OR $pathogen=="026");
+                    if($isEcoliPathogen){
+                        $postedEcoli = isset($postedStatus[$rowIdx]) ? (string)$postedStatus[$rowIdx] : '';
+                        $status = ($postedEcoli==="Positive" OR $postedEcoli==="Negative") ? $postedEcoli : "NR";
+                    }elseif($pathogen=="NR" OR $pathogen=="101"){
+                        $status="NR";
+                    }else{
+                        $status=$bdsis->real_escape_string(isset($postedStatus[$rowIdx]) ? $postedStatus[$rowIdx] : '');
+                    }
+                    $proby=$bdsis->real_escape_string(isset($postedProby[$rowIdx]) ? $postedProby[$rowIdx] : '');
+                    $prodate=bdsis_normalize_date(isset($postedProdate[$rowIdx]) ? $postedProdate[$rowIdx] : null);
+
+                    $brtrid=0;
+                    if($k['recid']!==''){
+                        $brtrid=(int)$k['recid'];
+                        $updQry = $bdsis->prepare("UPDATE bacteriology_result_table2 SET pathogen_id=?, e_pathogen=?, ast_status=?, processed_by=?, processed_on=?, recorded_by=?, recorded_on=? WHERE record_id=?");
+                        $updQry->bind_param("sssssssi", $pathogen, $ePathogen, $status, $proby, $prodate, $user, $today, $brtrid);
+                        $updQry->execute();
+                    }else{
+                        $insQry = $bdsis->prepare("INSERT INTO bacteriology_result_table2(subject_id, pathogen_id, e_pathogen, ast_status, processed_by, processed_on, recorded_by, recorded_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+                        $insQry->bind_param("ssssssss", $sid, $pathogen, $ePathogen, $status, $proby, $prodate, $user, $today);
+                        if($insQry->execute()){ $brtrid=$bdsis->insert_id; }
+                    }
+                    if($brtrid<=0){ continue; }
+
+                    /* Update ast result of this pathogen. E.coli genuinely never
+                       gets antimicrobial zones here, so 025/026 are keyed off the
+                       pathogen id alone -- a status of 'Positive' must not start
+                       writing bacteriology_ast_table rows. */
+                    if($isEcoliPathogen OR $pathogen=="NR" OR $pathogen=="101" OR $status=="NR"){
+                        $delAst = $bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=?");
+                        $delAst->bind_param("i", $brtrid);
+                        $delAst->execute();
+                        bdsis_bact_delete_resistance($bdsis, $brtrid);   // no AST panel, so no confirmatory tests
+                    }else{
+                        //check if ast results added or not
+                        $chkast=$bdsis->query("SELECT brt2_id FROM bacteriology_ast_table WHERE brt2_id='".$brtrid."'");
+                        $rowCodes=(isset($postedCode[$rowIdx]) AND is_array($postedCode[$rowIdx])) ? $postedCode[$rowIdx] : array();
+                        foreach($rowCodes as $agentIdx=>$rawCode){
+                            $code=$bdsis->real_escape_string(trim((string)$rawCode));
+                            if($code===""){ continue; }
+                            $zone=$bdsis->real_escape_string(isset($postedZone[$rowIdx][$agentIdx]) ? trim((string)$postedZone[$rowIdx][$agentIdx]) : '');
+                            $intrepretationqry=$bdsis->query("SELECT susceptible,intermediate1,intermediate2,resistance FROM ms_ast_table WHERE code='".$code."' AND ast_method_id='01'");
+                            if(!$intrepretationqry OR $intrepretationqry->num_rows==0){ continue; }
+                            list($sus,$int1,$int2,$res)=$intrepretationqry->fetch_row();
+                            $rslt="";
+                            if($zone<=$res){$rslt="Resistant";}
+                            if($zone>=$int1 AND $zone<=$int2){$rslt="Intermediate";}
+                            if($zone>=$sus){$rslt="Susceptible";}
+                            /* An empty zone is treated the same as the "-99" sentinel:
+                               the antibiotic was not tested for this isolate, so any
+                               prior row is removed and none is written. This mirrors
+                               the client-side bpAstInterpret() behaviour that clears
+                               the interpretation for empty / "-99" values. */
+                            if($zone!=="" AND $zone!="-99"){
+                                if($chkast->num_rows==0){
+                                    $insertAst=$bdsis->prepare("INSERT INTO bacteriology_ast_table(brt2_id, ast_method_id, antimicrobial_code, zone_diameter, ast_result) VALUES (?,?,?,?,?)");
+                                    $insertAst->bind_param("issds", $brtrid, $astMethodId, $code, $zone, $rslt);
+                                    $insertAst->execute();
+                                }
+                                else{
+                                    $updateAst=$bdsis->prepare("UPDATE bacteriology_ast_table SET zone_diameter=?, ast_result=? WHERE brt2_id=? AND antimicrobial_code=?");
+                                    $updateAst->bind_param("dsis", $zone, $rslt, $brtrid, $code);
+                                    $updateAst->execute();
+                                }
+                            }
+                            else{
+                                $delAstCode = $bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND antimicrobial_code=?");
+                                $delAstCode->bind_param("is", $brtrid, $code);
+                                $delAstCode->execute();
+                            }
+                        }
+                        /* Conditional ESBL / carbapenemase (mCIM, eCIM) results for this
+                           isolate, validated above before anything was written. */
+                        if(!bdsis_bact_save_resistance($bdsis, $brtrid, isset($resistPlans[$rowIdx]) ? $resistPlans[$rowIdx] : null, $user, $today)){
+                            $check = false;
+                            $errmsg .= ' ESBL / Carbapenemase results could not be saved.';
+                        }
+                    }
+                }
+            }
+
+        }else{
+            $check = false;
+            $errmsg.= ($resistError !== '') ? $resistError : 'Test Error';
+        }
+    }
+
+    /**
+     * Insert or Update eColi PCR Results
+     * To insert Strain Result, Create Array and loop through.
+     */
+    if ($submit=='eColiPcrResult') {
+        $sid=$bdsis->real_escape_string($_POST["sid"]);	
+        $remarks=$bdsis->real_escape_string($_POST["remarks"]);
+        /**
+         * if remark exist, update. Else insert Remarks
+         */
+        $chkqry=$bdsis->query("SELECT subject_id FROM rcdc_ecoli_pcr_result_table1 WHERE subject_id='".$sid."'");
+        if($chkqry->num_rows>0){
+            $rcdqry = $bdsis->prepare("UPDATE rcdc_ecoli_pcr_result_table1 SET remarks=? WHERE subject_id=?");
+            $rcdqry->bind_param("ss", $remarks, $sid);
+        }else{
+            $rcdqry = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_result_table1(subject_id, remarks, record_created_on) VALUES (?, ?, ?)");
+            $rcdqry->bind_param("sss", $sid, $remarks, $today);
+        }
+        if($rcdqry->execute()){
+
+            /**
+             * The form posts an unbounded number of PCR blocks as arrays keyed
+             * by the block index used in the markup:
+             *   ecoli[i], ecoliid[i], result[i], proby[i], prodate[i]
+             *   strainsel[i][], strain[i][<strainId>], rsltid[i][<strainId>]
+             * One block per E.coli isolate, so the two hardcoded ecoli1/ecoli2
+             * branches this replaced are now a single loop.
+             */
+            $postedEcoli    = (isset($_POST["ecoli"])    AND is_array($_POST["ecoli"]))    ? $_POST["ecoli"]    : array();
+            $postedResult   = (isset($_POST["result"])   AND is_array($_POST["result"]))   ? $_POST["result"]   : array();
+            $postedProby    = (isset($_POST["proby"])    AND is_array($_POST["proby"]))    ? $_POST["proby"]    : array();
+            $postedProdate  = (isset($_POST["prodate"])  AND is_array($_POST["prodate"]))  ? $_POST["prodate"]  : array();
+            $postedStrainSel= (isset($_POST["strainsel"])AND is_array($_POST["strainsel"]))? $_POST["strainsel"]: array();
+            $postedStrain   = (isset($_POST["strain"])   AND is_array($_POST["strain"]))   ? $_POST["strain"]   : array();
+            /* rsltid[i][x] is still posted for shape parity with the rendered
+               form, but the strain writer keys off (prt2_record_id,
+               ecoli_strain_id) instead -- see bdsis_save_ecoli_strains(). */
+
+            /* The set of pathology types the form is allowed to write, read from
+               the master table rather than trusted from the post. */
+            $ecoliStrainIds = array_keys(bdsis_ecoli_pcr_strains($bdsis));
+
+            /* One isolate can only be handled once per post: the storage is
+               keyed by (subject_id, ecoli_id), so a second block for the same
+               isolate would overwrite the first. */
+            $seenEcoliIds = array();
+
+            foreach($postedEcoli as $bi=>$rawEcoli){
+                if(!is_scalar($rawEcoli) OR (string)$rawEcoli===""){ continue; }
+                $ecoliId = $bdsis->real_escape_string((string)$rawEcoli);
+
+                if(isset($seenEcoliIds[$ecoliId])){ continue; }
+                $seenEcoliIds[$ecoliId] = true;
+
+                /**
+                 * SERVER-SIDE GATE: refuse to write PCR data for an isolate the
+                 * single visibility rule does not apply to, so a crafted POST
+                 * cannot create orphan PCR rows for a bacteriology row that was
+                 * never marked Positive.
+                 */
+                if(!bdsis_ecoli_pcr_applies($bdsis, $sid, $ecoliId)){ continue; }
+
+                $result = isset($postedResult[$bi]) ? $bdsis->real_escape_string((string)$postedResult[$bi]) : "";
+
+                /* Processing details are only stored for a decided result. */
+                if($result=="Positive" OR $result=="Negative"){
+                    $proby   = isset($postedProby[$bi])   ? $bdsis->real_escape_string((string)$postedProby[$bi])   : null;
+                    $prodate = bdsis_normalize_date(isset($postedProdate[$bi]) ? $postedProdate[$bi] : null);
+                } else { $proby=null; $prodate=null; }
+
+                $chkQry = $bdsis->query("SELECT record_id FROM rcdc_ecoli_pcr_result_table2 WHERE subject_id='".$sid."' AND ecoli_id='".$ecoliId."'");
+                if($chkQry AND $chkQry->num_rows>0){
+                    //Update this isolate's PCR record
+                    $pqry = $bdsis->prepare("UPDATE rcdc_ecoli_pcr_result_table2 SET ecoli_strain_result=?, processed_by=?, processed_on=?, recorded_by=?, recorded_on=? WHERE subject_id=? AND ecoli_id=?");
+                    $pqry->bind_param("sssssss", $result, $proby, $prodate, $user, $today, $sid, $ecoliId);
+                    $pqry->execute();
+                    /* The stored record_id, never the posted ecoliid[i]: a
+                       crafted value must not be able to steer the strain rows
+                       onto another subject's record. */
+                    list($existingRid) = $chkQry->fetch_row();
+                    $prt2rid = (int)$existingRid;
+                }else{
+                    //Insert this isolate's PCR record
+                    $pqry = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_result_table2(subject_id, ecoli_id, ecoli_strain_result, processed_by, processed_on, recorded_by, recorded_on) VALUES(?, ?, ?, ?, ?, ?, ?)");
+                    $pqry->bind_param("sssssss", $sid, $ecoliId, $result, $proby, $prodate, $user, $today);
+                    $prt2rid = $pqry->execute() ? $bdsis->insert_id : 0;
+                }
+
+                if($prt2rid<=0){ continue; }
+
+                /**
+                 * FOR EACH STRAIN POSITIVE OR NEGATIVE, INSERT THE STRAIN RESULT IF NOT ALREADY EXIST. ELSE DELETE THE STRAIN RESULTS.
+                 *
+                 * The six per-strain Positive/Negative dropdowns are a single
+                 * multi-select per block (strainsel[i][]). A strain the user
+                 * selected is stored Positive, every other one of the six is
+                 * stored Negative -- which keeps rcdc_ecoli_pcr_result_table3
+                 * exactly as it was shaped.
+                 */
+                if($result=="Positive" OR $result=="Negative"){
+                    $selected = (isset($postedStrainSel[$bi]) AND is_array($postedStrainSel[$bi])) ? $postedStrainSel[$bi] : array();
+                    //A Negative strain result means every pathology type is Negative.
+                    if($result=="Negative"){ $selected = array(); }
+
+                    /* Only strains this block actually rendered are written, and
+                       only ids present in the master list -- so a crafted post
+                       cannot introduce a strain the form never offered. */
+                    $blockStrainIds = (isset($postedStrain[$bi]) AND is_array($postedStrain[$bi]))
+                        ? array_values(array_intersect($ecoliStrainIds, array_map('strval', $postedStrain[$bi])))
+                        : $ecoliStrainIds;
+
+                    bdsis_save_ecoli_strains($bdsis, $prt2rid, $selected, $blockStrainIds);
+                }else{
+                    //Delete Strains and Strain Result if already added
+                    $sqry = $bdsis->prepare("DELETE FROM rcdc_ecoli_pcr_result_table3 WHERE prt2_record_id=?");
+                    $sqry->bind_param("i", $prt2rid);
+                    $sqry->execute();
+                }
+            }
+            
+            $check = true;
+        }else{
+            $check = false;
+            $errmsg.= 'Test Error';
+        }
+    }
+
+
+
+     /**
+     * Insert or Update eColi AST Results
+     */
+    if ($submit=='ecoliAstResult') {
+        $sid=$bdsis->real_escape_string($_POST["sid"]);
+
+        //check this method out
+        $methodList = array('a','b','c','d','e','f','g','h','i','j','k','l');
+        $countname = array('1','2','3','4','5','6','7','8','9','10','11','12');
+
+        /* E. coli AST MIC -- pass 1: validate every posted panel before anything
+           is written.
+             - The pathotype record a panel posts (prt3ridN) must belong to THIS
+               subject. It was used as posted, so a crafted id could delete or
+               write another subject's AST rows through a record the caller is
+               entitled to; bdsis_require_subject() above only vouched for sid.
+             - A panel set to MIC must carry at least one complete, unduplicated
+               entry, and Processed by / on (rcdc_ecoli_pcr_ast_table1 is written
+               for it, and that table's FK needs the rows).
+           See includes/lab-mic.php. Disk Diffusion rows are validated exactly as
+           before, in pass 2. */
+        $micMethod   = bdsis_mic_method_id();
+        $postedMic   = (isset($_POST['mic']) && is_array($_POST['mic'])) ? $_POST['mic'] : array();
+        $postedSidRaw = trim((string)$_POST["sid"]);
+        $astError    = '';
+        $micPlans    = array();
+        for ($k = 0; $k<count($methodList) && $astError === ''; $k++){
+            $method = "method".$methodList[$k];
+            if(!isset($_POST[$method])){ continue; }
+            $prtid   = "prt3rid".$countname[$k];
+            $rawPrt3 = (isset($_POST[$prtid]) && !is_array($_POST[$prtid])) ? trim((string)$_POST[$prtid]) : '';
+            if(bdsis_ecoli_prt3_owner($bdsis, $rawPrt3) !== $postedSidRaw){
+                $astError = 'An E.coli AST panel on this form does not belong to this record. Reopen the record and try again.';
+                break;
+            }
+            if(is_array($_POST[$method]) || (string)$_POST[$method] !== $micMethod){ continue; }
+
+            $panelName = 'E.coli AST';
+            $pn = $bdsis->prepare("SELECT s.ecoli_strain FROM rcdc_ecoli_pcr_result_table3 p3 JOIN ms_ecoli_strain_table s ON s.strain_id = p3.ecoli_strain_id WHERE p3.record_id = ?");
+            if($pn){
+                $pnId = (int)$rawPrt3;
+                $pn->bind_param("i", $pnId);
+                $pn->execute();
+                $pn->bind_result($pnName);
+                if($pn->fetch() && trim((string)$pnName) !== ''){ $panelName = trim((string)$pnName).' AST'; }
+                $pn->close();
+            }
+
+            $plan = bdsis_ecoli_mic_parse($bdsis, isset($postedMic[$rawPrt3]) ? $postedMic[$rawPrt3] : array(), $panelName);
+            if(!$plan['ok']){ $astError = $plan['error']; break; }
+            $micProby   = isset($_POST["proby".$countname[$k]]) && !is_array($_POST["proby".$countname[$k]]) ? trim((string)$_POST["proby".$countname[$k]]) : '';
+            $micProdate = bdsis_normalize_date($_POST["prodate".$countname[$k]] ?? null);
+            if($micProby === ''){ $astError = $panelName.': choose who processed the MIC test.'; break; }
+            if($micProdate === null){ $astError = $panelName.': enter a valid date of processing.'; break; }
+
+            /* An entry id already used by ANOTHER record (a crafted post) is
+               replaced rather than colliding with that record's row. */
+            foreach($plan['rows'] as $ri => $mr){
+                $uq = $bdsis->prepare("SELECT 1 FROM rcdc_ecoli_pcr_ast_table WHERE entry_uuid = ? AND prt3_record_id <> ?");
+                $uqId = (int)$rawPrt3;
+                $uqUuid = $mr['uuid'];
+                $uq->bind_param("si", $uqUuid, $uqId);
+                $uq->execute();
+                $uq->store_result();
+                if($uq->num_rows > 0){ $plan['rows'][$ri]['uuid'] = bdsis_uuid_v4(); }
+                $uq->close();
+            }
+            $micPlans[$rawPrt3] = $plan['rows'];
+        }
+
+        /* Pass 1b -- ESBL / Carbapenemase for every E.coli panel.
+
+           Same two tests, same CLSI rules and the same shared core the
+           bacteriology rows use (bdsis_resistance_plan_core); only the isolate
+           they hang off differs -- here a pathotype record rather than a
+           bacteriology isolate. The triggers are read from what the panel
+           RECORDED: a Disk Diffusion zone interpreted with the stored
+           breakpoints, or the reader's own MIC interpretation. An MIC value is
+           never classified here. A triggered but incomplete test refuses the
+           whole save before anything is written, exactly as bacteriology does,
+           and nothing is trusted from the browser. */
+        $ecoResistPlans = array();
+        if($astError === ''){
+            $ecoBp = bdsis_ast_breakpoints($bdsis);
+            for ($k = 0; $k<count($methodList) && $astError === ''; $k++){
+                $method = "method".$methodList[$k];
+                if(!isset($_POST[$method]) || is_array($_POST[$method])){ continue; }
+                $prtid   = "prt3rid".$countname[$k];
+                $rawPrt3 = (isset($_POST[$prtid]) && !is_array($_POST[$prtid])) ? trim((string)$_POST[$prtid]) : '';
+                if($rawPrt3 === ''){ continue; }   // ownership was proved in pass 1
+                $methodSel = (string)$_POST[$method];
+                if($methodSel !== '01' && $methodSel !== $micMethod){
+                    $ecoResistPlans[$rawPrt3] = null;   // Not Required / Pending: clear what was stored
+                    continue;
+                }
+                $ecoLabel   = bdsis_ecoli_panel_label($bdsis, $rawPrt3);
+                $ecoMicRows = isset($micPlans[$rawPrt3]) ? $micPlans[$rawPrt3] : array();
+                $ecoResults = bdsis_ecoli_ast_results($bdsis, $methodSel, $methodList[$k], $_POST, $ecoBp, $ecoMicRows);
+                $ecoPlan    = bdsis_ecoli_resistance_plan($bdsis, $rawPrt3, $ecoLabel, $ecoResults, $_POST);
+                if(!$ecoPlan['ok']){ $astError = $ecoPlan['error']; break; }
+                $ecoResistPlans[$rawPrt3] = $ecoPlan;
+            }
+        }
+
+        /* Pass 2 -- write, as one transaction: the delete-then-insert below used
+           to leave a panel emptied when an insert failed part-way. */
+        if($astError !== ''){
+            $check  = false;
+            $errmsg = $astError;
+        }else{
+        $bdsis->begin_transaction();
+        try{
+        for ($k = 0; $k<count($methodList); $k++){
+            $method = "method".$methodList[$k];
+            $prtid = "prt3rid".$countname[$k];
+            if(isset($_POST[$method])){
+                $prt3rid=$bdsis->real_escape_string($_POST[$prtid]);
+                $methodPost = $bdsis->real_escape_string($_POST[$method]);
+
+                if($_POST[$method]!="99"){
+                    $chkast=$bdsis->query("SELECT prt3_record_id FROM  rcdc_ecoli_pcr_ast_table WHERE prt3_record_id='".$prt3rid."'");
+                    if($chkast->num_rows>0){
+                        //Delete AST Records
+                        $delEcoliAstpy = $bdsis->prepare("DELETE FROM rcdc_ecoli_pcr_ast_table1 WHERE record_id=?");
+                        $delEcoliAstpy->bind_param("i", $prt3rid);
+                        $delEcoliAst = $bdsis->prepare("DELETE FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id=?");
+                        $delEcoliAst->bind_param("i", $prt3rid);
+                        
+                        if($delEcoliAstpy->execute() AND $delEcoliAst->execute()){
+                            $check = true;
+                        }  else{ $check = false;}
+                    }
+                    if($methodPost=='01'){
+                        $cntrx = "cntr".$methodList[$k];
+                        $cntra=$bdsis->real_escape_string($_POST[$cntrx]);
+                        $proby=$bdsis->real_escape_string($_POST["proby".$countname[$k]]);
+                        $prodate=bdsis_normalize_date($_POST["prodate".$countname[$k]] ?? null);
+                        //insert
+                        for($i=1;$i<=$cntra;$i++){
+                            $codea="code".$methodList[$k].$i;
+                            $zonea="zone".$methodList[$k].$i;
+                            $code=$bdsis->real_escape_string($_POST["$codea"]);
+                            $zone=$bdsis->real_escape_string(trim((string)$_POST["$zonea"]));
+                            $resqry = $bdsis->query("SELECT susceptible,intermediate1,intermediate2,resistance FROM ms_ast_table WHERE code='".$code."' AND ast_method_id='01'");
+                            list($sus,$int1,$int2,$res)=$resqry->fetch_row();
+                            if($zone<=$res){$rslt="Resistant";}
+                            if($zone>=$int1 AND $zone<=$int2){$rslt="Intermediate";}
+                            if($zone>=$sus){$rslt="Susceptible";}
+                            /* An empty zone is treated the same as the "-99" sentinel: the
+                               antibiotic was not tested for this strain. The bulk delete
+                               above already removed any prior row, so an empty zone simply
+                               produces no INSERT (matching the Bacteriology AST branch and
+                               the client-side ecoAstInterpret() behaviour that clears the
+                               interpretation for empty / "-99" values). */
+                            if($zone!=="" AND $zone!="-99"){
+                                //Insert Results
+                                $ecoliAst = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_ast_table(prt3_record_id, ast_method_id, antimicrobial_code, zone_diameter, ast_result) VALUES (?,?,?,?,?)");
+                                $ecoliAst->bind_param("issss", $prt3rid, $methodPost, $code, $zone, $rslt);
+                                if($ecoliAst->execute()){
+                                    $check = true;
+                                } else{ $check = false;}
+                            }
+                        }
+                        // Insert User Data
+                        $ecoliAstpby = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_ast_table1(record_id, processed_by, processed_on, recorded_by, recorded_on) VALUES (?,?,?,?,?)");
+                        $ecoliAstpby->bind_param("issss", $prt3rid, $proby, $prodate, $user, $today);
+                        if($ecoliAstpby->execute()){
+                            $check = true;
+                        } else{ $check = false;}
+                    }
+                    elseif($methodPost===$micMethod && isset($micPlans[trim((string)$_POST[$prtid])])){
+                        /* MIC entries, validated in pass 1. The value is stored in
+                           zone_diameter and the stated interpretation in ast_result;
+                           nothing is recalculated. */
+                        $micRows = $micPlans[trim((string)$_POST[$prtid])];
+                        $proby   = trim((string)$_POST["proby".$countname[$k]]);
+                        $prodate = bdsis_normalize_date($_POST["prodate".$countname[$k]] ?? null);
+                        $micIns  = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_ast_table(prt3_record_id, ast_method_id, antimicrobial_code, zone_diameter, ast_result, entry_uuid) VALUES (?,?,?,?,?,?)");
+                        foreach($micRows as $mr){
+                            $mCode = $mr['code']; $mValue = $mr['value']; $mResult = $mr['result']; $mUuid = $mr['uuid'];
+                            $micIns->bind_param("isssss", $prt3rid, $methodPost, $mCode, $mValue, $mResult, $mUuid);
+                            if(!$micIns->execute()){ throw new RuntimeException('MIC entry not saved'); }
+                        }
+                        $micIns->close();
+                        $ecoliAstpby = $bdsis->prepare("INSERT INTO rcdc_ecoli_pcr_ast_table1(record_id, processed_by, processed_on, recorded_by, recorded_on) VALUES (?,?,?,?,?)");
+                        $ecoliAstpby->bind_param("issss", $prt3rid, $proby, $prodate, $user, $today);
+                        if(!$ecoliAstpby->execute()){ throw new RuntimeException('MIC processing details not saved'); }
+                        $check = true;
+                    }
+                    /* The confirmatory results belong to this panel, so they are
+                       replaced with it. A null plan clears them. */
+                    $ecoKey = trim((string)$_POST[$prtid]);
+                    if(!bdsis_ecoli_save_resistance($bdsis, $prt3rid,
+                           isset($ecoResistPlans[$ecoKey]) ? $ecoResistPlans[$ecoKey] : null, $user, $today)){
+                        throw new RuntimeException('E.coli ESBL / carbapenemase results not saved');
+                    }
+                }else{
+                    /* Not Required: the panel holds no AST, so it holds no
+                       confirmatory test either. */
+                    if(!bdsis_ecoli_delete_resistance($bdsis, $prt3rid)){
+                        throw new RuntimeException('E.coli ESBL / carbapenemase results not cleared');
+                    }
+                    //Delete AST Record
+                    $delEcoliAstpy = $bdsis->prepare("DELETE FROM rcdc_ecoli_pcr_ast_table1 WHERE record_id=?");
+                    $delEcoliAstpy->bind_param("i", $prt3rid);
+                    $delEcoliAst = $bdsis->prepare("DELETE FROM rcdc_ecoli_pcr_ast_table WHERE prt3_record_id=?");
+                    $delEcoliAst->bind_param("i", $prt3rid);
+                    
+                    if($delEcoliAstpy->execute() AND $delEcoliAst->execute()){
+                        $check = true;
+                    }  else{ $check = false;}
+                }
+            }
+        }
+            /* A statement that reported failure without throwing still undoes
+               the whole save. */
+            if($check === false){ throw new RuntimeException('AST save incomplete'); }
+            $bdsis->commit();
+        }catch(Throwable $astEx){
+            $bdsis->rollback();
+            $check  = false;
+            $errmsg = 'The AST results could not be saved, so nothing was changed. Check the entries and try again.';
+        }
+        }
+    }
+
+    /**
+     * Insert or Update ELISA Results
+     */
+    if ($submit=='eLISAResult') {
+        $sid=$bdsis->real_escape_string($_POST["sid"]);
+        $remarks=$bdsis->real_escape_string($_POST["remarks"]);
+
+		$rota=$bdsis->real_escape_string($_POST["rota"]);
+        $noro=$bdsis->real_escape_string($_POST["noro"]);
+        $aden=$bdsis->real_escape_string($_POST["aden"]);
+        $astr=$bdsis->real_escape_string($_POST["astr"]);
+        $giar=$bdsis->real_escape_string($_POST["giar"]);
+        $cryp=$bdsis->real_escape_string($_POST["cryp"]);
+        $virus = array($rota, $noro, $aden, $astr, $giar, $cryp);
+        $virname = array('rota','noro','aden','astr','giar','cryp');
+        $virid = array('05','06','01','02','04','03');
+
+        /* Rotavirus genotype -- stored on the Rotavirus row (virus_id '05') only.
+           It is kept only when BOTH gating conditions hold, and both are decided
+           here from the database rather than from anything the form posted:
+             (a) the subject has E.coli ('025'/'026') in bacteriology_result_table2
+             (b) the Rotavirus ELISA result being saved is 'Positive'
+           The posted id is then whitelisted against the active rows of
+           ms_rotavirus_genotype_table, so an unknown or injected value degrades
+           to NULL instead of being stored or reaching the query.
+
+           This handler deletes and re-inserts all six virus rows on every save,
+           so the genotype must be supplied again on each insert below or it
+           would silently vanish the next time this form is saved. */
+        $rotaGenotype = null;
+        $rotaGpIds    = array();
+        if($rota=="Positive" && bdsis_subject_has_ecoli($bdsis, $sid)){
+            $postedGenotype = (isset($_POST["rotagenotype"]) AND !is_array($_POST["rotagenotype"])) ? (string) $_POST["rotagenotype"] : '';
+            if($postedGenotype !== '' && array_key_exists($postedGenotype, bdsis_active_rotavirus_genotypes($bdsis))){
+                $rotaGenotype = $postedGenotype;
+            }else{
+                /* The single Genotype dropdown has been removed from the form, so
+                   nothing posts this any more. The six virus rows are deleted and
+                   re-inserted on every save, so whatever a historical record already
+                   holds in genotype_id is carried over here instead of being wiped.
+                   Genotyping is now recorded as the G/P selections below. */
+                $keepGenotypeQ = $bdsis->prepare("SELECT genotype_id FROM rcdc_elisa_result_table2 WHERE subject_id=? AND virus_id='05' AND genotype_id IS NOT NULL");
+                if($keepGenotypeQ){
+                    $keepGenotypeQ->bind_param("s", $sid);
+                    $keepGenotypeQ->execute();
+                    $keepGenotypeQ->bind_result($keptGenotype);
+                    if($keepGenotypeQ->fetch() AND (string)$keptGenotype !== ''){ $rotaGenotype = (string)$keptGenotype; }
+                    $keepGenotypeQ->close();
+                }
+            }
+
+            /* BDSIS New Field Request - Rotavirus Genotyping. The G type / P type
+               selections are gated by exactly the same two conditions, decided
+               here from the database and never from the form. Each posted id is
+               whitelisted against the active genotypes inside
+               bdsis_rotavirus_gp_save(). When the gate does not hold the list
+               stays empty, which clears anything stored before. */
+            foreach(array('rota_gtype', 'rota_ptype') as $gpField){
+                if(isset($_POST[$gpField]) AND is_array($_POST[$gpField])){
+                    foreach($_POST[$gpField] as $gpId){
+                        if(!is_array($gpId)){ $rotaGpIds[] = (string)$gpId; }
+                    }
+                }
+            }
+        }
+
+        $chk=$bdsis->query("SELECT subject_id FROM rcdc_elisa_result_table1 WHERE subject_id='".$sid."'");
+        if($chk->num_rows>0){
+            //Delete ELISA Records
+            $delElisaRemarks = $bdsis->prepare("DELETE FROM rcdc_elisa_result_table1 WHERE subject_id=?");
+            $delElisaRemarks->bind_param("s", $sid);
+            $delElisa = $bdsis->prepare("DELETE FROM rcdc_elisa_result_table2 WHERE subject_id=?");
+            $delElisa->bind_param("s", $sid);
+            
+            if($delElisa->execute() AND $delElisaRemarks->execute() ){
+                $check = true;
+            }  else{ $check = false;}
+        } 
+		
+		$elisaRemarks = $bdsis->prepare("INSERT INTO rcdc_elisa_result_table1(subject_id, remarks, record_created_on) VALUES (?,?,?)");
+        $elisaRemarks->bind_param("sss", $sid, $remarks, $today);
+        if($elisaRemarks->execute()){
+            $check = true;
+        } else{ $check = false;}
+		
+        for($i=0; $i<count($virus); $i++){
+            $vir= $virus[$i];
+            $vid = $virid[$i];
+
+			// Only the Rotavirus row carries a genotype; every other virus row stores NULL.
+			$gid = ($vid=='05') ? $rotaGenotype : null;
+
+			//Insert Results
+			$elisaResult = $bdsis->prepare("INSERT INTO rcdc_elisa_result_table2(record_id,subject_id, virus_id, elisa_result, od_value, processed_by, assay_date, recorded_by, recorded_on, genotype_id) VALUES (?,?,?,?,?,?,?,?,?,?)");
+            if($virus[$i]=="Positive" || $virus[$i]=="Negative" || $virus[$i]=="Equivocal"){
+                //Insert
+                $od=$bdsis->real_escape_string($_POST[$virname[$i]."od"]);
+                $proby=$bdsis->real_escape_string($_POST[$virname[$i]."proby"]);
+                $prodate=bdsis_normalize_date($_POST[$virname[$i]."prodate"] ?? null);
+                $elisaResult->bind_param("isssdsssss", $null, $sid, $vid, $vir, $od, $proby, $prodate, $user, $today, $gid);
+                if($elisaResult->execute()){
+                    $check = true;
+                } else{ $check = false;}
+            }else{
+                $elisaResult->bind_param("isssdsssss", $null, $sid, $vid, $vir, $null, $user, $null, $user, $today, $gid);
+                if($elisaResult->execute()){
+                    $check = true;
+                } else{ $check = false;}
+            }
+        }
+
+        /* BDSIS New Field Request - Rotavirus Genotyping. Stored after the six
+           virus rows, against the subject rather than the ELISA record_id: the
+           block above deletes and re-inserts those rows on every save, so a
+           record_id key would be cascade-deleted each time. An empty list
+           clears any previous selection. */
+        if(!bdsis_rotavirus_gp_save($bdsis, $sid, $rotaGpIds, $user, $today)){
+            $check = false;
+            $errmsg .= ' Rotavirus G/P genotypes could not be saved.';
+        }
+    }
+
+
+    /* Record who changed it and when, and let the status follow the data:
+       a record that now holds everything it needs becomes Completed, one
+       part-entered becomes In Progress. Verified/Approved are never
+       downgraded here -- only Verify and Return move a record out of those. */
+    if($check){ bdsis_lab_touch($bdsis, $postedSid, $user); }
+
+    $lnk = "lab.php?action=1&sid=$sid";
+
+    /* AJAX submit: return the same message text and target as JSON so the user
+       stays on the lab screen instead of seeing this processing page and clicking
+       Close. Logic, validation and message text are unchanged; a non-AJAX request
+       still gets the SweetAlert + redirect page below. */
+    if (strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array(
+            'ok'  => (bool)$check,
+            'msg' => ($check ? 'Submitted Successfully!! ' : 'Submission Failed!! ') . $errmsg,
+            'lnk' => $lnk,
+        ));
+        exit;
+    }
+
+    echo("<input type='hidden' name='lnk' id='lnk' value='$lnk'/>");
+
+    if($check){
+        $bdsis->close();	
+?>
+	<script>
+		$(function() {
+			var lnk = $('#lnk').val();
+			Swal.fire({
+				icon: 'success',
+				confirmButtonText: 'Close',
+				text: 'Submitted Successfully!! <?=$errmsg;?>',
+				showCloseButton: true
+			})
+			.then(function (result) { window.location = lnk; })
+		});
+	</script>		
+	<?php }	else { /* echo $bdsis->error; */?>
+	<script>
+		$(function() {
+			var lnk = $('#lnk').val();
+			Swal.fire({
+				icon: 'error',
+				confirmButtonText: 'Close',
+				text: 'Submission Failed!! <?=$errmsg;?>',
+				showCloseButton: true
+			})
+			.then(function (result) { window.location = lnk; })
+		});
+	</script>
+<?php } ?>

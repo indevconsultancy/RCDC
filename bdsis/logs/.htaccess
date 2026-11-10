@@ -1,0 +1,2 @@
+# Audit logs. Never served over HTTP -- they name users and their roles.
+Require all denied

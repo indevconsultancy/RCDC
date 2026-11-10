@@ -1,0 +1,292 @@
+<?php
+/* =============================================================================
+   Bacteriology MIC — Phase 1 (per "MIC Document" protocol images).
+   -----------------------------------------------------------------------------
+   Adds a Method selector (Disk Diffusion / MIC) to each Enteric Pathogen row's
+   AST panel. When the user picks MIC, the existing Disk Diffusion antibiotic
+   grid is hidden and this file's panel is shown instead: same 14-antibiotic
+   list, same per-row Interpretation pill, but zone inputs become free-text MIC
+   inputs validated by bdsis_mic_normalize_value() (grammar already used by
+   E. coli AST MIC entries).
+
+   Phase 1 scope — ship this session:
+     * Method dropdown + DD/MIC toggle (lab.php)
+     * MIC panel renderer + hardcoded breakpoints (this file)
+     * iu-lab.php reads method[rowIdx] and routes save
+   Phase 2 — deferred:
+     * Salmonella/Shigella/Enterococcus pathogen-specific antibiotic subsets
+     * β-lactam resistance "new variable after Pathogen 3" MIC columns
+     * Admin seeding of ms_ast_table method='02' rows (replaces hardcoded map)
+
+   Breakpoints match image 2 of the MIC Document. The symbolic values below
+   (e.g. "≤8", "16^", "≥32", "2/38") are what the panel RENDERS as reference
+   hints. For live interpretation we use the numeric 's' / 'r' thresholds
+   extracted alongside them (clean floats), compared against the first numeric
+   substring of whatever the user types.
+
+   Database:
+     Reuses bacteriology_ast_table -- the schema already has `ast_method_id`
+     (VARCHAR) and `zone_diameter` (VARCHAR(10) wide enough for MIC strings
+     like "<=0.5", "0.12-0.5^"). No ALTER needed. `ast_result` holds the
+     interpretation. ast_method_id is '01' for Disk Diffusion rows (unchanged)
+     and '02' for MIC rows added by this file.
+   ============================================================================= */
+
+if (!defined('BDSIS_LAB_BACT_MIC_LOADED')) {
+    define('BDSIS_LAB_BACT_MIC_LOADED', 1);
+}
+
+if (!function_exists('bdsis_bact_mic_breakpoints')) {
+    /**
+     * Antibiotic => breakpoint record. Order is the panel's visual order.
+     *   'agent'  display name
+     *   'mic_s'  Susceptible reference text (as shown on-image)
+     *   'mic_i'  Intermediate reference text ("-" means not defined)
+     *   'mic_r'  Resistant reference text
+     *   's'      numeric Susceptible threshold (float) — "MIC ≤ s" ⇒ S
+     *   'r'      numeric Resistant threshold (float)   — "MIC ≥ r" ⇒ R
+     */
+    function bdsis_bact_mic_breakpoints()
+    {
+        return array(
+            'AMP' => array('agent'=>'Ampicillin',                    'mic_s'=>'≤8',    'mic_i'=>'16^',   'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'CZO' => array('agent'=>'Cefazolin',                     'mic_s'=>'≤2',    'mic_i'=>'4',     'mic_r'=>'≥8',    's'=>2,    'r'=>8),
+            'CRO' => array('agent'=>'Ceftriaxone',                   'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'CTX' => array('agent'=>'Cefotaxime',                    'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'CAZ' => array('agent'=>'Ceftazidime',                   'mic_s'=>'≤4',    'mic_i'=>'8^',    'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'GEN' => array('agent'=>'Gentamicin',                    'mic_s'=>'≤4',    'mic_i'=>'8^',    'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'TCY' => array('agent'=>'Tetracycline',                  'mic_s'=>'≤4',    'mic_i'=>'8',     'mic_r'=>'≥16',   's'=>4,    'r'=>16),
+            'CIP' => array('agent'=>'Ciprofloxacin',                 'mic_s'=>'≤0.25', 'mic_i'=>'0.5^',  'mic_r'=>'≥1',    's'=>0.25, 'r'=>1),
+            'CHL' => array('agent'=>'Chloramphenicol',               'mic_s'=>'≤8',    'mic_i'=>'16',    'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'NAL' => array('agent'=>'Nalidixic acid',                'mic_s'=>'≤8',    'mic_i'=>'-',     'mic_r'=>'≥32',   's'=>8,    'r'=>32),
+            'SXT' => array('agent'=>'Trimethoprim-sulfamethoxazole', 'mic_s'=>'≤2/38', 'mic_i'=>'-',     'mic_r'=>'≥4/76', 's'=>2,    'r'=>4),
+            'ETP' => array('agent'=>'Ertapenem',                     'mic_s'=>'≤0.5',  'mic_i'=>'1^',    'mic_r'=>'≥2',    's'=>0.5,  'r'=>2),
+            'IPM' => array('agent'=>'Imipenem',                      'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+            'MEM' => array('agent'=>'Meropenem',                     'mic_s'=>'≤1',    'mic_i'=>'2^',    'mic_r'=>'≥4',    's'=>1,    'r'=>4),
+        );
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_interpret')) {
+    /**
+     * MIC value → interpretation string ('Susceptible'/'Intermediate'/'Resistant').
+     *
+     * Takes the first numeric substring from the user's input (so "<=0.5"
+     * reads as 0.5, "16^" as 16, ">64" as 64), then compares against the
+     * numeric Susceptible / Resistant thresholds from the breakpoint record:
+     *   value ≤ s  → Susceptible
+     *   value ≥ r  → Resistant
+     *   otherwise  → Intermediate
+     * Returns '' (blank) when the antibiotic code is not in the breakpoint
+     * map or the value cannot be parsed to a positive number.
+     *
+     * @return string
+     */
+    function bdsis_bact_mic_interpret($code, $value)
+    {
+        $code = strtoupper(trim((string)$code));
+        $bps  = bdsis_bact_mic_breakpoints();
+        if (!isset($bps[$code])) { return ''; }
+        $v = trim((string)$value);
+        if ($v === '') { return ''; }
+        if (!preg_match('~\d+(\.\d+)?~', $v, $m)) { return ''; }
+        $num = (float)$m[0];
+        if ($num <= 0) { return ''; }
+        $sThr = isset($bps[$code]['s']) ? (float)$bps[$code]['s'] : null;
+        $rThr = isset($bps[$code]['r']) ? (float)$bps[$code]['r'] : null;
+        if ($sThr !== null && $num <= $sThr) { return 'Susceptible'; }
+        if ($rThr !== null && $num >= $rThr) { return 'Resistant'; }
+        return 'Intermediate';
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_load_saved')) {
+    /**
+     * Saved MIC readings for one isolate (bacteriology_ast_table rows with
+     * ast_method_id='02' for the brt2_id). Returns map code => array('value','result').
+     *
+     * @return array
+     */
+    function bdsis_bact_mic_load_saved($bdsis, $brt2id)
+    {
+        $out = array();
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return $out; }
+        $q = @$bdsis->query("SELECT antimicrobial_code, zone_diameter, ast_result
+                               FROM bacteriology_ast_table
+                              WHERE brt2_id=".$brt2id." AND ast_method_id='02'");
+        if ($q) {
+            while (list($c, $z, $r) = $q->fetch_row()) {
+                $out[strtoupper((string)$c)] = array(
+                    'value'  => (string)$z,
+                    'result' => (string)$r,
+                );
+            }
+            $q->free();
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_panel_html')) {
+    /**
+     * The MIC AST sub-panel for one pathogen row. Sibling of #bpDd{idx};
+     * lab.php toggles between them via bpSetAstMethod().
+     *
+     * @param  string $idx    row index (matches the DD panel)
+     * @param  array  $saved  code => array('value','result'); empty for new rows
+     * @param  bool   $show   initial visibility (true when method='02')
+     * @return string
+     */
+    function bdsis_bact_mic_panel_html($idx, $saved = array(), $show = false)
+    {
+        $hv  = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES); };
+        $bps = bdsis_bact_mic_breakpoints();
+
+        $h  = '<div class="lr-bact-mic" id="bpMic'.$idx.'" style="display:'.($show ? 'block' : 'none').';">';
+        $h .= '<div class="lr-subcard lr-subcard--ast lr-subcard--mic">';
+        $h .= '<div class="lr-subcard__head"><h4 class="lr-subcard__title">Antimicrobial Susceptibility &mdash; MIC</h4>'
+            . '<span class="lr-subcard__meta">Minimum Inhibitory Concentration (mg/L) &middot; interpreted as you type</span></div>';
+        $h .= '<div class="row lr-grid-head d-none d-md-flex">'
+            . '<div class="col-md-3">Antibiotic</div>'
+            . '<div class="col-md-3">Breakpoints (S / I / R)</div>'
+            . '<div class="col-md-2">MIC (mg/L)</div>'
+            . '<div class="col-md-4">Interpretation</div></div>';
+
+        $j = 0;
+        foreach ($bps as $code => $bp) {
+            $cur    = isset($saved[$code]) ? $saved[$code] : array('value'=>'', 'result'=>'');
+            $vId    = 'bpMicVal'.$idx.'_'.$code;
+            $rId    = 'bpMicRes'.$idx.'_'.$code;
+            $hintS  = $bp['mic_s'];
+            $hintI  = $bp['mic_i'];
+            $hintR  = $bp['mic_r'];
+
+            $h .= '<div class="row lr-line bp-mic-row">';
+            /* Antibiotic + hidden code (code[idx][j] is reused per DD; MIC
+               posts its own `mic_code[idx][code]` + `mic_value[idx][code]`
+               keyed by antibiotic code so DD and MIC never share input names. */
+            $h .= '<div class="col-md-3 lr-cell lr-cell--name"><span class="lr-agent">'.$hv($bp['agent']).'</span>'
+                . '<span class="lr-agent-sub">'.$hv($code).'</span></div>';
+            /* Reference breakpoints — the user sees what they are reading against. */
+            $h .= '<div class="col-md-3 lr-cell d-none d-md-block"><span class="lr-muted-cell">'
+                . 'S '.$hv($hintS).' &middot; I '.$hv($hintI).' &middot; R '.$hv($hintR)
+                . '</span></div>';
+            /* MIC value input. Pattern mirrors bdsis_mic_normalize_value()
+               (comparator optional, decimal, range, split, trailing ^). */
+            $h .= '<div class="col-6 col-md-2 lr-cell"><label class="lr-cell-label" for="'.$vId.'">MIC (mg/L)<span class="sr-only">, '.$hv($bp['agent']).'</span>:</label>'
+                . '<input type="text" name="mic_value['.$idx.']['.$code.']" id="'.$vId.'"'
+                . ' class="form-control text-center bp-mic-value" maxlength="10" data-code="'.$hv($code).'"'
+                . ' data-s="'.$hv((string)$bp['s']).'" data-r="'.$hv((string)$bp['r']).'"'
+                . ' value="'.$hv($cur['value']).'" autocomplete="off" spellcheck="false"'
+                . ' placeholder="e.g. &lt;=0.5, 2, 16, &gt;64"'
+                . ' pattern="\s*(&lt;=|&gt;=|&lt;|&gt;|=|≤|≥)?\s*\d+(\.\d+)?(-\d+(\.\d+)?)?(\s*/\s*\d+(\.\d+)?(-\d+(\.\d+)?)?)?\s*\^?\s*"'
+                . ' oninput="bpBactMicInterpret(this);" /></div>';
+            /* Interpretation pill */
+            $h .= '<div class="col-6 col-md-4 lr-cell"><label class="lr-cell-label" for="'.$rId.'">Result<span class="sr-only">, '.$hv($bp['agent']).'</span>:</label>'
+                . '<input type="text" name="mic_result['.$idx.']['.$code.']" id="'.$rId.'"'
+                . ' value="'.$hv($cur['result']).'" class="form-control lr-pill bp-mic-result"'
+                . ' readonly tabindex="-1" aria-label="MIC result, '.$hv($bp['agent']).'" /></div>';
+            $h .= '</div>';
+            $j++;
+        }
+
+        $h .= '<div class="lr-help"><i class="fas fa-info-circle" aria-hidden="true"></i><span>'
+            . 'MIC values accept a comparator (<code>&lt;=</code>, <code>&gt;=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>=</code>, <code>&le;</code>, <code>&ge;</code>), '
+            . 'a number, an optional range (e.g. <code>0.12-0.5</code>), an optional combination split (e.g. <code>0.5/9.5</code>) and an optional trailing <code>^</code> marker. '
+            . 'Leave a row blank if the antibiotic was not tested — the save path writes nothing for empty rows.'
+            . '</span></div>';
+        $h .= '</div></div>';
+        return $h;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_parse_post')) {
+    /**
+     * Pull one row's MIC fields from $_POST and return normalised rows ready
+     * for save. Each entry: code => array('value','result'). Rows with empty
+     * value are returned so the save path can DELETE them (replace semantics).
+     *
+     * @return array
+     */
+    function bdsis_bact_mic_parse_post($rowIdx, $post)
+    {
+        $out    = array();
+        $values = (isset($post['mic_value'][$rowIdx]) && is_array($post['mic_value'][$rowIdx])) ? $post['mic_value'][$rowIdx] : array();
+        foreach (bdsis_bact_mic_breakpoints() as $code => $_bp) {
+            $raw = isset($values[$code]) ? trim((string)$values[$code]) : '';
+            if ($raw === '') { $out[$code] = array('value'=>'', 'result'=>''); continue; }
+            /* Server-side normalisation (reuses the E. coli MIC grammar). */
+            $norm = function_exists('bdsis_mic_normalize_value') ? bdsis_mic_normalize_value($raw) : $raw;
+            if ($norm === null) {
+                /* Invalid grammar -> treat as empty rather than storing junk. */
+                $out[$code] = array('value'=>'', 'result'=>''); continue;
+            }
+            $out[$code] = array(
+                'value'  => (string)$norm,
+                'result' => bdsis_bact_mic_interpret($code, $norm),
+            );
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_save')) {
+    /**
+     * Replace-semantics write for one isolate's MIC readings. Deletes any
+     * prior method=02 rows for the brt2_id, then INSERTs one row per non-empty
+     * antibiotic. Nothing done when $brt2id is invalid.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_save($bdsis, $brt2id, $rows)
+    {
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+
+        $del = @$bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND ast_method_id='02'");
+        if (!$del) { return false; }
+        $del->bind_param("i", $brt2id);
+        $del->execute();
+        $del->close();
+
+        if (!is_array($rows) || count($rows) === 0) { return true; }
+
+        $ins = @$bdsis->prepare("INSERT INTO bacteriology_ast_table
+                                 (brt2_id, ast_method_id, antimicrobial_code, zone_diameter, ast_result)
+                                 VALUES (?, '02', ?, ?, ?)");
+        if (!$ins) { return false; }
+        foreach ($rows as $code => $row) {
+            $v = isset($row['value']) ? (string)$row['value'] : '';
+            if ($v === '') { continue; }
+            $c = strtoupper((string)$code);
+            $r = isset($row['result']) ? (string)$row['result'] : '';
+            $ins->bind_param("isss", $brt2id, $c, $v, $r);
+            if (!$ins->execute()) { $ins->close(); return false; }
+        }
+        $ins->close();
+        return true;
+    }
+}
+
+if (!function_exists('bdsis_bact_mic_delete_dd')) {
+    /**
+     * When the user switches a row FROM Disk Diffusion TO MIC on an edit,
+     * iu-lab.php calls this so stale DD rows for the isolate are cleared.
+     * Only DD rows (ast_method_id='01') are removed; AmpC/ESBL/CPE tables
+     * live elsewhere and are not touched.
+     *
+     * @return bool
+     */
+    function bdsis_bact_mic_delete_dd($bdsis, $brt2id)
+    {
+        $brt2id = (int)$brt2id;
+        if ($brt2id <= 0 || !($bdsis instanceof mysqli)) { return false; }
+        $q = @$bdsis->prepare("DELETE FROM bacteriology_ast_table WHERE brt2_id=? AND ast_method_id='01'");
+        if (!$q) { return false; }
+        $q->bind_param("i", $brt2id);
+        $ok = $q->execute();
+        $q->close();
+        return (bool)$ok;
+    }
+}

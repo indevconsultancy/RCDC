@@ -1,0 +1,342 @@
+<?php
+/* ===========================================================================
+   Key AMR phenotypes -- Dashboard widget.
+   ---------------------------------------------------------------------------
+   Isolated component: this file owns its own bootstrap, its own queries, its
+   own card markup, its own <script>. Nothing outside it is imported and no
+   variable it defines leaks into an adjacent widget's scope (every local is
+   $keyAmr* or leading-underscore).
+
+   Placement: included by dashboard/chart.php immediately after the
+   "Antimicrobial Resistance" chart card.
+
+   The five phenotype rates it draws (MDR / ESBL / AmpC / FQ-R / CRE) come
+   from the surveillance data already in BDSIS:
+     * denominator (n)  distinct isolates with any AST reading that year
+     * MDR              isolate is resistant to >= 3 distinct antibiotic
+                        classes (classification below matches the surveillance
+                        protocol's 16-class table)
+     * FQ-R             isolate has any Fluoroquinolone Resistant
+     * CRE              isolate has EVERY tested Carbapenem Resistant (>=1)
+     * ESBL             bacteriology_resistance_table.esbl_result = ESBL producer
+     * AmpC             the schema does not carry an AmpC phenotype flag today,
+                        so the series renders as 0% -- graceful fallback per
+                        spec, no error thrown.
+
+   The file has two output modes:
+     * default (included from chart.php or opened directly): renders the card
+     * ?format=json: returns the aggregate rows the widget draws, keyed by year.
+                     RBAC + scope still enforced (bootstrap runs first).
+   =========================================================================== */
+
+/* Bootstrap only when we are opened standalone. When included from chart.php
+   $bdsis / $SCOPE_SU already exist and we reuse them. */
+if (!isset($bdsis)) {
+    require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/session.php");
+    require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/commondb-config.php");
+    require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/config/db-config.php");
+    require_once($_SERVER["DOCUMENT_ROOT"]."/BDSIS/includes/rbac.php");
+    bdsis_require_module();
+    $SCOPE_SU = bdsis_scope_clause($bdsis, "su.center_id");
+}
+if (!isset($SCOPE_SU)) { $SCOPE_SU = ''; }
+
+/* ---------- Antimicrobial class map (16 classes from the protocol) ----------
+   Each entry lists lowercase substrings we look for in
+   ms_ast_table.antimicrobial_agent. Substring so slight spelling variants
+   ("Trimethoprim-sulfamethoxazole" vs "Trimethoprim/Sulfamethoxazole") still
+   land in the right class. Order matters only where two synonyms could
+   coincide -- the first match wins. */
+$KEYAMR_CLASSES = array(
+    'Penicillins'                              => array('ampicillin','amoxicillin'),
+    'Extended spectrum cephalosporins'         => array('ceftazidime','cefepime','ceftriaxone','cefotaxime'),
+    'Cephamycins'                              => array('cefoxitin','cefotetan'),
+    'Penicillins + BLI'                        => array('amoxicillin-clavulanate','ampicillin-sulbactam','amoxicillin/clavulanate','co-amoxiclav'),
+    'Anti-pseudomonal penicillins + BLI'       => array('piperacillin-tazobactam','ticarcillin-clavulanate','piperacillin/tazobactam'),
+    'Carbapenems'                              => array('ertapenem','imipenem','meropenem','doripenem'),
+    'Monobactams'                              => array('aztreonam'),
+    'Aminoglycosides'                          => array('gentamicin','amikacin','tobramycin'),
+    'Fluoroquinolones'                         => array('ciprofloxacin','levofloxacin','norfloxacin','ofloxacin','moxifloxacin'),
+    'Folate pathway inhibitors'                => array('trimethoprim','sulfamethoxazole','cotrimoxazole','co-trimoxazole','sxt','tmp-smx'),
+    'Tetracyclines'                            => array('tetracycline','doxycycline'),
+    'Phenicols'                                => array('chloramphenicol'),
+    'Fosfomycins'                              => array('fosfomycin'),
+    'Lipopeptides'                             => array('colistin','polymyxin b'),
+    'Glycylcycline'                            => array('tigecycline'),
+    'Siderophore'                              => array('cefiderocol'),
+);
+
+/* Build antimicrobial CODE -> CLASS name from the master. Codes are upper-cased
+   so the comparison against bacteriology_ast_table.antimicrobial_code is
+   case-insensitive on the join side too. */
+$keyAmrCodeClass = array();
+$_agq = @$bdsis->query("SELECT code, antimicrobial_agent FROM ms_ast_table WHERE ast_method_id='01'");
+if ($_agq) {
+    while (list($_code, $_agent) = $_agq->fetch_row()) {
+        $_lc = strtolower(trim((string)$_agent));
+        foreach ($KEYAMR_CLASSES as $_cls => $_synonyms) {
+            foreach ($_synonyms as $_syn) {
+                if ($_lc !== '' && strpos($_lc, $_syn) !== false) {
+                    $keyAmrCodeClass[strtoupper((string)$_code)] = $_cls;
+                    break 2;
+                }
+            }
+        }
+    }
+    $_agq->free();
+}
+$keyAmrCarbCodes = array_keys(array_filter($keyAmrCodeClass, function ($c) { return $c === 'Carbapenems'; }));
+$keyAmrFqCodes   = array_keys(array_filter($keyAmrCodeClass, function ($c) { return $c === 'Fluoroquinolones'; }));
+
+/* Optional phenotype table -- exists once ESBL/CPE workflow was deployed. */
+$keyAmrHasResistanceTable = false;
+$_tk = @$bdsis->query("SHOW TABLES LIKE 'bacteriology_resistance_table'");
+if ($_tk && $_tk->num_rows > 0) { $keyAmrHasResistanceTable = true; }
+if ($_tk) { $_tk->free(); }
+
+/* ---------- Denominator (n): distinct isolates with any AST reading, per year,
+              in scope. Same "tested" universe every % below is computed against. */
+$keyAmrData = array();   // [year] => ['n'=>, 'mdr'=>, 'esbl'=>, 'ampc'=>, 'fqr'=>, 'cre'=>]
+$_yn = @$bdsis->query("SELECT YEAR(su.hospital_visit_date) y, COUNT(DISTINCT b.record_id) c
+                         FROM bacteriology_result_table2 b
+                         JOIN bacteriology_ast_table a ON a.brt2_id = b.record_id
+                         JOIN subject_information_table su ON b.subject_id = su.subject_id
+                        WHERE YEAR(su.hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE_SU
+                        GROUP BY y ORDER BY y");
+if ($_yn) {
+    while ($_r = $_yn->fetch_row()) {
+        $keyAmrData[(int)$_r[0]] = array('n' => (int)$_r[1], 'mdr' => 0, 'esbl' => 0, 'ampc' => 0, 'fqr' => 0, 'cre' => 0);
+    }
+    $_yn->free();
+}
+
+/* ---------- MDR: pull every Resistant row, then in PHP tally distinct classes
+              per (year, isolate). >=3 classes -> MDR. Doing the class mapping
+              in PHP keeps the SQL portable and avoids a CASE ladder as long as
+              the class table itself. */
+if (!empty($keyAmrCodeClass) && !empty($keyAmrData)) {
+    $_mdr = @$bdsis->query("SELECT YEAR(su.hospital_visit_date) y, a.brt2_id, UPPER(a.antimicrobial_code) code
+                              FROM bacteriology_ast_table a
+                              JOIN bacteriology_result_table2 b ON a.brt2_id = b.record_id
+                              JOIN subject_information_table su ON b.subject_id = su.subject_id
+                             WHERE a.ast_result = 'Resistant'
+                               AND YEAR(su.hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE_SU");
+    $_tally = array();
+    if ($_mdr) {
+        while ($_r = $_mdr->fetch_row()) {
+            $_code = (string)$_r[2];
+            if (!isset($keyAmrCodeClass[$_code])) { continue; }
+            $_tally[(int)$_r[0]][(string)$_r[1]][$keyAmrCodeClass[$_code]] = true;
+        }
+        $_mdr->free();
+    }
+    foreach ($_tally as $_y => $_isolates) {
+        if (!isset($keyAmrData[$_y])) { continue; }
+        foreach ($_isolates as $_bid => $_classes) {
+            if (count($_classes) >= 3) { $keyAmrData[$_y]['mdr']++; }
+        }
+    }
+}
+
+/* ---------- FQ-R: distinct isolates with any Fluoroquinolone Resistant. */
+if (!empty($keyAmrFqCodes)) {
+    $_inFq = "'" . implode("','", array_map(function ($c) use ($bdsis) { return $bdsis->real_escape_string($c); }, $keyAmrFqCodes)) . "'";
+    $_fq = @$bdsis->query("SELECT YEAR(su.hospital_visit_date) y, COUNT(DISTINCT a.brt2_id) c
+                             FROM bacteriology_ast_table a
+                             JOIN bacteriology_result_table2 b ON a.brt2_id = b.record_id
+                             JOIN subject_information_table su ON b.subject_id = su.subject_id
+                            WHERE a.ast_result = 'Resistant' AND UPPER(a.antimicrobial_code) IN ($_inFq)
+                              AND YEAR(su.hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE_SU
+                            GROUP BY y");
+    if ($_fq) {
+        while ($_r = $_fq->fetch_row()) { if (isset($keyAmrData[(int)$_r[0]])) { $keyAmrData[(int)$_r[0]]['fqr'] = (int)$_r[1]; } }
+        $_fq->free();
+    }
+}
+
+/* ---------- CRE: isolate is Carbapenem-resistant when EVERY tested carbapenem
+              is Resistant (and at least one was tested). Strict "all" reading
+              from the surveillance protocol. */
+if (!empty($keyAmrCarbCodes)) {
+    $_inCa = "'" . implode("','", array_map(function ($c) use ($bdsis) { return $bdsis->real_escape_string($c); }, $keyAmrCarbCodes)) . "'";
+    $_cre = @$bdsis->query("SELECT YEAR(su.hospital_visit_date) y, a.brt2_id,
+                                    SUM(a.ast_result = 'Resistant') r, COUNT(*) n
+                              FROM bacteriology_ast_table a
+                              JOIN bacteriology_result_table2 b ON a.brt2_id = b.record_id
+                              JOIN subject_information_table su ON b.subject_id = su.subject_id
+                             WHERE UPPER(a.antimicrobial_code) IN ($_inCa)
+                               AND YEAR(su.hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE_SU
+                             GROUP BY y, a.brt2_id
+                            HAVING r = n AND n > 0");
+    if ($_cre) {
+        while ($_r = $_cre->fetch_row()) { if (isset($keyAmrData[(int)$_r[0]])) { $keyAmrData[(int)$_r[0]]['cre']++; } }
+        $_cre->free();
+    }
+}
+
+/* ---------- ESBL: phenotype-confirmed producer, from the resistance table.
+              Table may not exist in older installs -- we probed above and just
+              skip the query when it isn't there (series renders 0%). */
+if ($keyAmrHasResistanceTable) {
+    $_es = @$bdsis->query("SELECT YEAR(su.hospital_visit_date) y, COUNT(DISTINCT x.brt2_id) c
+                             FROM bacteriology_resistance_table x
+                             JOIN bacteriology_result_table2 b ON x.brt2_id = b.record_id
+                             JOIN subject_information_table su ON b.subject_id = su.subject_id
+                            WHERE x.esbl_result = 'ESBL producer'
+                              AND YEAR(su.hospital_visit_date) BETWEEN 2015 AND YEAR(CURDATE()) $SCOPE_SU
+                            GROUP BY y");
+    if ($_es) {
+        while ($_r = $_es->fetch_row()) { if (isset($keyAmrData[(int)$_r[0]])) { $keyAmrData[(int)$_r[0]]['esbl'] = (int)$_r[1]; } }
+        $_es->free();
+    }
+}
+
+/* ---------- AmpC: BDSIS does not currently store an AmpC phenotype flag.
+              Per the spec's "Graceful Fallbacks" rule the series renders as
+              0% without erroring. When AmpC gets its own column, add its
+              query here -- no other file needs to change. */
+
+/* ---------- Build the series the chart draws + the JSON the endpoint returns. */
+ksort($keyAmrData);
+$keyAmrCats = array(); $keyAmrN = array();
+$keyAmrMdr = array(); $keyAmrEsbl = array(); $keyAmrAmpc = array(); $keyAmrFqr = array(); $keyAmrCre = array();
+foreach ($keyAmrData as $_y => $_d) {
+    $_pct = function ($num) use ($_d) { return $_d['n'] > 0 ? round(100 * $num / $_d['n'], 1) : 0; };
+    $keyAmrCats[] = (int)$_y;
+    $keyAmrN[]    = (int)$_d['n'];
+    $keyAmrMdr[]  = $_pct($_d['mdr']);
+    $keyAmrEsbl[] = $_pct($_d['esbl']);
+    $keyAmrAmpc[] = $_pct($_d['ampc']);
+    $keyAmrFqr[]  = $_pct($_d['fqr']);
+    $keyAmrCre[]  = $_pct($_d['cre']);
+}
+
+/* JSON endpoint mode. RBAC + scope already applied by the bootstrap above. */
+if (isset($_GET['format']) && $_GET['format'] === 'json') {
+    $_rows = array();
+    foreach ($keyAmrCats as $_i => $_y) {
+        $_rows[] = array(
+            'year'     => (int)$_y,
+            'total_n'  => (int)$keyAmrN[$_i],
+            'mdr_pct'  => (float)$keyAmrMdr[$_i],
+            'esbl_pct' => (float)$keyAmrEsbl[$_i],
+            'ampc_pct' => (float)$keyAmrAmpc[$_i],
+            'fqr_pct'  => (float)$keyAmrFqr[$_i],
+            'cre_pct'  => (float)$keyAmrCre[$_i],
+        );
+    }
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(array(
+        'generated_at' => date('c'),
+        'component'    => 'KeyAmrPhenotypesWidget',
+        'rows'         => $_rows,
+    ), JSON_UNESCAPED_SLASHES);
+    exit;
+}
+?>
+<!-- Key AMR phenotypes widget -- self-contained; matches the surrounding
+     dash-row / dash-col-12 / chart-card conventions so its visual weight
+     mirrors the Antimicrobial Resistance card above it. -->
+<div class="dash-row">
+  <div class="dash-col-12">
+    <div class="chart-card key-amr-widget" style="--chart-accent:var(--nt-amber)">
+      <div class="chart-card__head">
+        <h3 class="chart-card__title">Key AMR phenotypes</h3>
+        <p class="chart-card__sub">Illustrative example of tracking major resistance phenotypes over surveillance years.</p>
+      </div>
+      <div class="chart-card__body"><div id="keyAmrPhenotypesChart" style="height:340px;"></div></div>
+      <div class="key-amr-widget__foot" style="padding:.6rem 1.15rem .85rem;font-size:.78rem;color:#64748b;border-top:1px solid #f1f5f9;line-height:1.5;">
+        Display the denominator (n) for each year; do not interpret changes when sample sizes are very small without appropriate caution.
+        <?php if (!empty($keyAmrCats)): ?>
+          <span style="display:block;margin-top:.35rem;color:#334155;">
+            <b>n by year &mdash;</b>
+            <?php foreach ($keyAmrCats as $_i => $_y): ?>
+              <span style="display:inline-block;margin:0 .55rem .1rem 0;"><b><?= (int)$_y ?></b>: <?= (int)$keyAmrN[$_i] ?></span>
+            <?php endforeach; ?>
+          </span>
+        <?php else: ?>
+          <span style="display:block;margin-top:.35rem;color:#94a3b8;font-style:italic;">No AST readings in scope yet.</span>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="text/javascript">
+$(function () {
+  /* Isolated init. The widget plots EVERY surveillance year as its own data
+     point, so the per-chart Year filter that chart.php adds to the shared
+     `exp` would be meaningless here (there is no single "selected year" to
+     change). We therefore use a bare exporting config -- Fullscreen / Print /
+     Download / CSV / XLS / View Data stay, but the "View this chart in <y>"
+     items are deliberately absent. Nothing outside this block is touched --
+     no Highcharts.setOptions, no global JS state. */
+  var kaExp = {
+    scale: 3,
+    fallbackToExportServer: false,
+    buttons: {
+      contextButton: {
+        menuItems: [
+          'viewFullscreen', 'printChart', 'separator',
+          'downloadPNG', 'downloadJPEG', 'downloadPDF', 'downloadSVG', 'separator',
+          'downloadCSV', 'downloadXLS', 'viewData'
+        ]
+      }
+    }
+  };
+  var kaN   = <?= json_encode(array_map('intval', $keyAmrN)) ?>;
+  var kaCats = <?= json_encode(array_map('intval', $keyAmrCats)) ?>;
+
+  if (typeof Highcharts === 'undefined' || !kaCats.length) {
+    /* Graceful fallback: keep the card visible with the footer note, drop the
+       chart silently rather than throwing. */
+    var box = document.getElementById('keyAmrPhenotypesChart');
+    if (box) {
+      box.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:.85rem;">No data to plot for the current scope.</div>';
+    }
+    return;
+  }
+
+  Highcharts.chart('keyAmrPhenotypesChart', {
+    chart: { type: 'line' },
+    credits: { enabled: false },
+    title: { text: null },
+    /* Override chart.php's setOptions default: this widget plots every surveillance
+       year as its own data point, so "Surveillance year: <year>" would mislabel it. */
+    subtitle: { text: 'All surveillance years &middot; trend', useHTML: true, align: 'left', y: 2,
+                style: { fontSize: '11px', color: '#64748b', fontWeight: '500' } },
+    exporting: kaExp,
+    xAxis: { categories: kaCats, title: { text: 'Surveillance Year' } },
+    yAxis: {
+      min: 0, max: 100, tickInterval: 20,
+      title: { text: '% of isolates tested' },
+      labels: { format: '{value}%' }
+    },
+    tooltip: {
+      shared: true, useHTML: true,
+      formatter: function () {
+        var idx = (this.points && this.points[0]) ? this.points[0].point.index : 0;
+        var s = '<b>' + this.x + '</b> &middot; n = ' + (kaN[idx] || 0);
+        (this.points || []).forEach(function (p) {
+          s += '<br/><span style="color:' + p.color + '">●</span> ' + p.series.name + ': <b>' + p.y + '%</b>';
+        });
+        return s;
+      }
+    },
+    plotOptions: {
+      line: {
+        marker: { enabled: true, radius: 4, symbol: 'circle' },
+        lineWidth: 2
+      }
+    },
+    series: [
+      { name: 'MDR',  data: <?= json_encode(array_map('floatval', $keyAmrMdr))  ?>, color: '#dc2626' },
+      { name: 'ESBL', data: <?= json_encode(array_map('floatval', $keyAmrEsbl)) ?>, color: '#0891b2' },
+      { name: 'AmpC', data: <?= json_encode(array_map('floatval', $keyAmrAmpc)) ?>, color: '#7c3aed' },
+      { name: 'FQ-R', data: <?= json_encode(array_map('floatval', $keyAmrFqr))  ?>, color: '#f59e0b' },
+      { name: 'CRE',  data: <?= json_encode(array_map('floatval', $keyAmrCre))  ?>, color: '#0f766e' }
+    ]
+  });
+});
+</script>

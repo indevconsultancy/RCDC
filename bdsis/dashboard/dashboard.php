@@ -1,0 +1,95 @@
+<?php /* Buffered so a refusal can discard the part-built page and answer with a
+         real 403. Without it the dashboard returned 200 with the denial drawn
+         inside the layout -- no data leaked, but nothing checking the status
+         could tell it had been refused. */
+   ob_start(); ?>
+<!-- Check session -->
+<?php require_once("../config/session.php"); ?>
+<?php
+	require_once("../includes/rbac.php");
+	bdsis_require_module();   // refuse before any query runs or any panel renders
+?>
+
+<?php
+	/* The ?par= handover is gone. It base64-decoded a URL parameter straight into
+	   $_SESSION["acl"], so "?par=" . base64_encode("1:1:1") made any logged-in
+	   user a BDSIS administrator -- verified against this build with a Drug
+	   Regulatory Authority account that has no BDSIS access at all: refused with
+	   403 before, records and export both 200 after.
+
+	   Nothing needs to replace it. BDSIS no longer reads the role from the
+	   session; bdsis_identity() reads it from user_system_access_table for
+	   system_id=6, which is the same query the BDSIS login already ran and the
+	   only record of what a user may do here. */
+?>
+
+<!-- Page header -->
+<?php require_once("../includes/header.php"); ?>
+<!-- Database Connection -->
+<?php require_once("../config/commondb-config.php"); ?>
+<?php require_once("../config/db-config.php"); ?>
+<!-- CSS-Jquery -->
+<?php require_once("../includes/css-jquery.php"); ?>
+<!-- Highcharts -->
+<?php require_once("../includes/highcharts.php"); ?>
+<body class="hold-transition sidebar-mini">
+<div class="wrapper">
+  <!-- Top Navbar -->
+  <?php require_once("../includes/top-navbar.php"); ?>
+  <!-- Main Sidebar Container -->
+  <?php require_once("../includes/sidebar-menu.php"); ?>
+
+  <?php
+	$cur_year = date("Y");
+    $cur_month = date("m");
+    $col = $cur_month+1;
+  ?>
+  <!-- Content Wrapper. Contains page content -->
+<div class="content-wrapper">
+    <!-- Content Header (Page header) -->
+    <div class="content-header">
+      <div class="container-fluid">
+        <div class="row mb-2">
+          <div class="col-sm-7">
+            <h1 class="m-0">Diarrhoea Surveillance Dashboard</h1>
+          </div><!-- /.col -->
+          <div class="col-sm-5">
+            <ol class="breadcrumb float-sm-right">
+              <li class="breadcrumb-item"><a href="#">Home</a></li>
+              <li class="breadcrumb-item active">Dashboard</li>
+            </ol>
+          </div><!-- /.col -->
+        </div><!-- /.row -->
+      </div><!-- /.container-fluid -->
+    </div>
+    <!-- /.content-header -->
+    <!-- Main content -->
+	<div class="content">
+		<div class="container-fluid">
+			<?php
+			  /* chart.php lays out its own KPI grid and chart cards, so it is
+			     included directly. It used to sit inside a card, which put every
+			     card inside another card. */
+			  include_once('chart.php');
+			?>
+		</div>
+	</div>
+</div>
+  <!-- /.content-wrapper -->
+  <script>
+    $(function () {
+      $('#table').DataTable({
+        "paging": true,
+        "lengthChange": false,
+        "searching": false,
+        "ordering": true,
+        "info": true,
+        "autoWidth": false,
+        "responsive": true,
+        "order": [[ 0, "asc" ]]
+      });
+    });
+  </script>                      
+  
+<!-- /.page footer -->
+<?php require_once("../includes/footer.php"); ?>

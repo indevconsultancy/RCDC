@@ -1,0 +1,217 @@
+<link rel="stylesheet" href="/BDSIS/plugins/fontawesome-free/css/all.min.css">
+<link rel="stylesheet" href="/BDSIS/dist/css/adminlte.min.css">
+<link rel="stylesheet" href="/BDSIS/dist/css/bdsis-theme.css">
+<body style="background:#f4f6f9">
+
+<div style="padding:30px;max-width:1000px;margin:0 auto">
+
+  <p style="font:600 13px sans-serif;color:#666">7 steps, step 4 active &mdash; matches the supplied reference</p>
+  <div class="card"><div class="card-body py-3">
+    <div class="wizard-steps mb-3">
+      <a class='wizard-step done' href='#'><span class='step-no'><i class='fa fa-check'></i></span><span class='step-label'>Step 1</span></a>
+      <a class='wizard-step done' href='#'><span class='step-no'><i class='fa fa-check'></i></span><span class='step-label'>Step 2</span></a>
+      <a class='wizard-step done' href='#'><span class='step-no'><i class='fa fa-check'></i></span><span class='step-label'>Step 3</span></a>
+      <a class='wizard-step active' href='#'><span class='step-no'>4</span><span class='step-label'>Step 4</span></a>
+      <a class='wizard-step' href='#'><span class='step-no'>5</span><span class='step-label'>Step 5</span></a>
+      <a class='wizard-step' href='#'><span class='step-no'>6</span><span class='step-label'>Step 6</span></a>
+      <a class='wizard-step' href='#'><span class='step-no'>7</span><span class='step-label'>Step 7</span></a>
+    </div>
+  </div></div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Real BDSIS case wizard &mdash; edit mode, step 3 active</p>
+  <div class="card"><div class="card-body py-3">
+    <div class="wizard-steps mb-3">
+      <a class='wizard-step done' href='#'><span class='step-no'><i class='fa fa-check'></i></span><span class='step-label'>Case Details</span></a>
+      <a class='wizard-step done' href='#'><span class='step-no'><i class='fa fa-check'></i></span><span class='step-label'>Sample Shipment</span></a>
+      <a class='wizard-step active' href='#'><span class='step-no'>3</span><span class='step-label'>Microscopy Result</span></a>
+      <a class='wizard-step' href='#'><span class='step-no'>4</span><span class='step-label'>Preview</span></a>
+    </div>
+    <small class="text-muted d-block text-center mt-1">2 of 3 sections completed</small>
+  </div></div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Real BDSIS case wizard &mdash; add mode (later steps locked)</p>
+  <div class="card"><div class="card-body py-3">
+    <div class="wizard-steps mb-3">
+      <a class='wizard-step active' href='#'><span class='step-no'>1</span><span class='step-label'>Case Details</span></a>
+      <a class='wizard-step locked' href='#'><span class='step-no'>2</span><span class='step-label'>Sample Shipment</span></a>
+      <a class='wizard-step locked' href='#'><span class='step-no'>3</span><span class='step-label'>Microscopy Result</span></a>
+      <a class='wizard-step locked' href='#'><span class='step-no'>4</span><span class='step-label'>Preview</span></a>
+    </div>
+    <small class="text-muted d-block text-center mt-1">0 of 3 sections completed &mdash; save Case Details to unlock the remaining steps</small>
+  </div></div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Required-field asterisks &mdash; added automatically to any field with <code>required</code></p>
+  <div class="card"><div class="card-body">
+    <div class="row">
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Subject ID:</label>
+        <input type="text" class="form-control" name="demoSid" required>
+      </div>
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Processed by:</label>
+        <input type="text" class="form-control" name="demoProby" required>
+      </div>
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Contact No (optional):</label>
+        <input type="text" class="form-control" name="demoOptional">
+      </div>
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Enteric Pathogen:</label>
+        <select class="form-control" name="demoSel" required><option>Select</option></select>
+      </div>
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Category:</label>
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="demoCat" id="demoCat1" value="1" required>
+          <label class="form-check-label" for="demoCat1">Surveillance</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="demoCat" id="demoCat2" value="2" required>
+          <label class="form-check-label" for="demoCat2">Outbreak</label>
+        </div>
+      </div>
+      <div class="form-group col-sm-4">
+        <label class="col-form-label-sm">Remarks:</label>
+        <textarea class="form-control" name="demoRemarks" rows="2"></textarea>
+      </div>
+    </div>
+    <button type="button" class="btn btn-sm btn-primary" onclick="
+      var d=document.createElement('div');
+      d.className='row';
+      d.innerHTML='&lt;div class=\'form-group col-sm-4\'&gt;&lt;label class=\'col-form-label-sm\'&gt;Dynamically Added Field:&lt;/label&gt;&lt;input type=\'text\' class=\'form-control\' required&gt;&lt;/div&gt;';
+      this.parentNode.insertBefore(d,this);">Add a row (tests dynamic fields)</button>
+    <small class="d-block text-muted mt-2">Optional fields stay unmarked. The radio group gets one asterisk on
+      &ldquo;Category&rdquo;, not on each option. Newly added rows are marked automatically.</small>
+  </div></div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Search bar &mdash; up to 6 per row, equal width and height, stretching to fill when fewer</p>
+
+  <div class="card"><div class="card-body">
+    <small class="text-muted">6 fields &mdash; each one sixth</small>
+    <div class="row search-filters">
+      <div class="form-group"><select class="form-control"><option>All dzongkhag</option></select></div>
+      <div class="form-group"><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group"><input class="form-control" placeholder="Subject ID"></div>
+      <div class="form-group"><input class="form-control" placeholder="Patient Name"></div>
+      <div class="form-group"><input class="form-control" placeholder="From date"></div>
+      <div class="form-group"><input class="form-control" placeholder="To date"></div>
+    </div>
+  </div></div>
+
+  <div class="card mt-3"><div class="card-body">
+    <small class="text-muted">Export page &mdash; labelled fields with Export/Reset on the same row (previously the buttons dropped to their own line)</small>
+    <div class="row search-filters">
+      <div class="form-group"><label class="col-form-label-sm">Health Facility:</label><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group"><label class="col-form-label-sm">Category:</label><select class="form-control"><option>All</option></select></div>
+      <div class="form-group"><label class="col-form-label-sm">Hospital Visit Date From:</label><input class="form-control" value="2026-01-01"></div>
+      <div class="form-group"><label class="col-form-label-sm">Hospital Visit Date To:</label><input class="form-control" value="2026-07-21"></div>
+      <div class="form-group search-actions">
+        <button type="button" class="btn bg-gradient-success"><i class="fa fa-table"></i>&nbsp Export</button>
+        <a href="#" class="btn bg-gradient-secondary"><i class="fa fa-sync"></i>&nbsp Reset</a>
+      </div>
+    </div>
+  </div></div>
+
+  <div class="card mt-3"><div class="card-body">
+    <small class="text-muted">Unlabelled fields with Search/Reset inline</small>
+    <div class="row search-filters">
+      <div class="form-group"><select class="form-control"><option>All dzongkhag</option></select></div>
+      <div class="form-group"><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group"><input class="form-control" placeholder="Subject ID"></div>
+      <div class="form-group"><input class="form-control" placeholder="Patient Name"></div>
+      <div class="form-group search-actions">
+        <button type="button" class="btn bg-gradient-success"><i class="fa fa-search"></i>&nbsp Search</button>
+        <a href="#" class="btn bg-gradient-secondary"><i class="fa fa-sync"></i>&nbsp Reset</a>
+      </div>
+    </div>
+  </div></div>
+
+  <div class="card mt-3"><div class="card-body">
+    <small class="text-muted">5 fields &mdash; stretched to equal fifths (previously wrapped 4 + 1)</small>
+    <div class="row search-filters">
+      <div class="form-group"><select class="form-control"><option>All dzongkhag</option></select></div>
+      <div class="form-group"><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group"><input class="form-control" placeholder="Subject ID"></div>
+      <div class="form-group"><input class="form-control" placeholder="Patient Name"></div>
+      <div class="form-group"><input class="form-control" placeholder="Category"></div>
+    </div>
+  </div></div>
+
+  <div class="card mt-3"><div class="card-body">
+    <small class="text-muted">4 fields (Individual Report / Records) and 3 fields (Lab) &mdash; both fill the row</small>
+    <div class="row search-filters">
+      <div class="form-group col-sm-3"><select class="form-control"><option>All dzongkhag</option></select></div>
+      <div class="form-group col-sm-3"><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group col-sm-3"><input class="form-control" placeholder="Subject ID"></div>
+      <div class="form-group col-sm-3"><input class="form-control" placeholder="Patient Name"></div>
+    </div>
+    <div class="row search-filters">
+      <div class="form-group col-sm-3"><select class="form-control"><option>All dzongkhag</option></select></div>
+      <div class="form-group col-sm-3"><select class="form-control"><option>All facility</option></select></div>
+      <div class="form-group col-sm-3"><input class="form-control" placeholder="Subject ID"></div>
+    </div>
+  </div></div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Dashboard year filter &mdash; restyled (Tasks &amp; Notifications panel removed)</p>
+  <form class="dash-toolbar" onsubmit="return false">
+    <div class="dash-toolbar__field">
+      <label class="dash-toolbar__label" for="prevYear"><i class="far fa-calendar-alt"></i> Surveillance Year</label>
+      <select id="prevYear" class="form-control"><option>2026</option><option>2025</option><option>2024</option></select>
+    </div>
+    <div class="dash-toolbar__meta">
+      <span class="dash-toolbar__scope">Viewing <strong>2026</strong></span>
+      <span class="dash-toolbar__note">Cases, geography, demographics, trends &amp; antimicrobial resistance</span>
+    </div>
+  </form>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Dashboard KPI cards &mdash; hover one (elevation, shadow, accent widens). Not clickable: no pointer cursor, no link.</p>
+  <div class="kpi-grid">
+    <article class="kpi-card" style="--kpi-accent:var(--nt-sky);--kpi-tint:rgba(23,162,184,.12)">
+      <span class="kpi-card__icon"><i class="fas fa-procedures"></i></span>
+      <div class="kpi-card__body"><p class="kpi-card__label">Diarrhoea Cases</p><p class="kpi-card__value">858</p>
+        <p class="kpi-card__meta">vs 2018 <span class="kpi-delta kpi-delta--up"><i class="fas fa-arrow-up"></i> 42.3%</span></p></div>
+    </article>
+    <article class="kpi-card" style="--kpi-accent:var(--nt-primary);--kpi-tint:rgba(0,123,255,.12)">
+      <span class="kpi-card__icon"><i class="fas fa-vials"></i></span>
+      <div class="kpi-card__body"><p class="kpi-card__label">Samples Collected</p><p class="kpi-card__value">825</p>
+        <p class="kpi-card__meta">Surveillance year 2019</p></div>
+    </article>
+    <article class="kpi-card" style="--kpi-accent:var(--nt-slate-500);--kpi-tint:rgba(100,116,139,.12)">
+      <span class="kpi-card__icon"><i class="fas fa-microscope"></i></span>
+      <div class="kpi-card__body"><p class="kpi-card__label">Lab Results Recorded</p><p class="kpi-card__value">863</p>
+        <p class="kpi-card__meta">Subjects with a bacteriology result</p></div>
+    </article>
+    <article class="kpi-card" style="--kpi-accent:var(--nt-red);--kpi-tint:rgba(220,53,69,.12)">
+      <span class="kpi-card__icon"><i class="fas fa-bacteria"></i></span>
+      <div class="kpi-card__body"><p class="kpi-card__label">Pathogens Isolated</p><p class="kpi-card__value">80</p>
+        <p class="kpi-card__meta">Positivity <b>9.3%</b> of 863 tested</p></div>
+    </article>
+    <article class="kpi-card" style="--kpi-accent:var(--nt-amber);--kpi-tint:rgba(253,126,20,.12)">
+      <span class="kpi-card__icon"><i class="fas fa-shield-virus"></i></span>
+      <div class="kpi-card__body"><p class="kpi-card__label">AMR &mdash; Resistant</p><p class="kpi-card__value">34.9%</p>
+        <p class="kpi-card__meta">767 susceptibility tests</p></div>
+    </article>
+  </div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">Chart card shell</p>
+  <div class="dash-row">
+    <div class="dash-col-7"><div class="chart-card" style="--chart-accent:var(--nt-sky)">
+      <div class="chart-card__head"><h3 class="chart-card__title">Incidence Trend</h3>
+        <p class="chart-card__sub">Monthly cases against an outbreak threshold of mean + 2 SD (138.7)</p></div>
+      <div class="chart-card__body"><div style="height:150px;background:repeating-linear-gradient(90deg,#f1f5f9 0 24px,#fff 24px 48px);border-radius:6px"></div></div>
+    </div></div>
+    <div class="dash-col-5"><div class="chart-card" style="--chart-accent:var(--nt-red)">
+      <div class="chart-card__head"><h3 class="chart-card__title">Pathogen Prevalence</h3>
+        <p class="chart-card__sub">Top isolates, 2019</p></div>
+      <div class="chart-card__body"><div style="height:150px;background:repeating-linear-gradient(90deg,#f1f5f9 0 24px,#fff 24px 48px);border-radius:6px"></div></div>
+    </div></div>
+  </div>
+
+  <p style="font:600 13px sans-serif;color:#666;margin-top:28px">PDF report letterhead</p>
+  <div class="card"><div class="card-body text-center">
+    <img src="/BDSIS/dist/img/rcdc-letterhead.jpg" style="max-width:100%">
+  </div></div>
+
+</div>
+<script src="/BDSIS/dist/js/required-fields.js"></script>
+</body>

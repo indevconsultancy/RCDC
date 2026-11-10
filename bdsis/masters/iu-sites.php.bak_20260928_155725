@@ -1,0 +1,40 @@
+<?php
+/**
+ * Save endpoint for masters/sites.php. POST only, admin-only, CSRF-checked.
+ *
+ * The ONE write this endpoint accepts is toggling ms_health_center_table.dsis
+ * for a given centre. Every other column (status, center_name, dzongkhag_code)
+ * is shared with the other RCDC surveillance systems and must be edited in
+ * the shared administration portal, not here.
+ */
+require_once __DIR__ . '/_inc.php';
+bdsis_csrf_require();
+
+if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    mdFlash('danger', 'This action must be submitted from the form.');
+    mdRedirect('sites.php');
+}
+
+$do  = isset($_POST['do'])  ? (string)$_POST['do']  : '';
+$cid = isset($_POST['cid']) ? trim((string)$_POST['cid']) : '';
+$to  = isset($_POST['to'])  ? (string)$_POST['to']  : '';
+
+if ($do !== 'toggle_dsis') { mdFlash('danger', 'Only the BDSIS participation flag may be changed here.'); mdRedirect('sites.php'); }
+if ($cid === '')          { mdFlash('danger', 'Centre id is required.');       mdRedirect('sites.php'); }
+if ($to !== '0' && $to !== '1') { mdFlash('danger', 'Invalid target value.');  mdRedirect('sites.php'); }
+
+$newVal = (int)$to;
+$q = $commondb->prepare("UPDATE ms_health_center_table SET dsis=? WHERE center_id=?");
+if (!$q) { mdFlash('danger', 'Database error.'); mdRedirect('sites.php'); }
+$q->bind_param("is", $newVal, $cid);
+$ok  = $q->execute();
+$aff = $q->affected_rows; $q->close();
+
+if ($ok && $aff > 0) {
+    mdFlash('success', 'BDSIS participation ' . ($newVal ? 'enabled' : 'disabled') . " for centre $cid.");
+} elseif ($ok) {
+    mdFlash('info', "No change: centre $cid was already " . ($newVal ? 'enabled' : 'disabled') . '.');
+} else {
+    mdFlash('danger', 'Update failed.');
+}
+mdRedirect('sites.php');
